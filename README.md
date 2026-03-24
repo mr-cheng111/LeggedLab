@@ -1,100 +1,122 @@
-# Legged Lab: Direct IsaacLab Workflow for Legged Robots
+# LeggedLab (Fork by mr-cheng111)
 
 [![IsaacSim](https://img.shields.io/badge/IsaacSim-4.5.0-silver.svg)](https://docs.omniverse.nvidia.com/isaacsim/latest/overview.html)
 [![Isaac Lab](https://img.shields.io/badge/IsaacLab-2.1.0-silver)](https://isaac-sim.github.io/IsaacLab)
-[![RSL_RL](https://img.shields.io/badge/RSL_RL-2.3.1-silver)](https://github.com/leggedrobotics/rsl_rl)
+[![RSL_RL](https://img.shields.io/badge/RSL_RL-3.1.2-silver)](https://github.com/leggedrobotics/rsl_rl)
 [![Python](https://img.shields.io/badge/python-3.10-blue.svg)](https://docs.python.org/3/whatsnew/3.10.html)
-[![Linux platform](https://img.shields.io/badge/platform-linux--64-orange.svg)](https://releases.ubuntu.com/22.04/)
-[![Windows platform](https://img.shields.io/badge/platform-windows--64-orange.svg)](https://www.microsoft.com/en-us/)
 [![License](https://img.shields.io/badge/license-BSD--3-yellow.svg)](https://opensource.org/licenses/BSD-3-Clause)
-[![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white)](https://pre-commit.com/)
 
 ## Overview
 
-This repository provides a direct workflow for training a legged robot using IsaacLab. It provides high transparency and low refactoring difficulty of the direct environment, and uses isaaclab components to simplify the workflow.
+这是一个基于 IsaacLab 的足式机器人强化学习训练仓库（个人维护分支）。
 
-It has all the necessary conditions for sim-to-real and has been tested on real unitree g1 and h1 robots, [video available](https://www.bilibili.com/video/BV1tNRgYQEnr/).
-Deploy Code: https://github.com/Hellod035/LeggedLabDeploy
+当前分支重点是：
+- 保持原始 LeggedLab 的直接环境工作流
+- 便于按个人需求快速修改训练脚本、日志和任务配置
+- 支持使用 `wandb` 作为默认训练日志后端
 
-**Maintainer**: Wandong Sun
-**Contact**: 24b908020@stu.hit.edu.cn
+## Fork Statement
 
-**Key Features:**
+本仓库基于原作者项目二次开发：
+- Original repository: https://github.com/Hellod035/LeggedLab
+- Original author: Wandong Sun
 
-- `Easy to Reorganize` Provides a direct workflow, allowing for fine-grained definition of environment logic.
-- `Isolation` Work outside the core Isaac Lab repository, ensuring that the development efforts remain self-contained.
-- `Long-term support` This repository will be updated with the updates of isaac sim and isaac lab, and will be supported for a long time.
-
-
+本仓库在保留原始许可证（BSD-3-Clause）的前提下进行修改与扩展。
 
 ## Installation
 
-LeggedLab is built against the latest version of Isaacsim/IsaacLab. It is recommended to follow the latest updates of legged lab.
+建议先安装 Isaac Lab（推荐 conda 方式）：
+- Isaac Lab install guide: https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html
 
-- Install Isaac Lab by following the [installation guide](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html). We recommend using the conda installation as it simplifies calling Python scripts from the terminal.
-
-- Clone this repository separately from the Isaac Lab installation (i.e. outside the `IsaacLab` directory):
-
-```bash
-# Option 1: HTTPS
-git clone https://github.com/Hellod035/LeggedLab
-
-# Option 2: SSH
-git clone git@github.com:Hellod035/LeggedLab.git
-```
-
-- Using a python interpreter that has Isaac Lab installed, install the library
+然后克隆本仓库：
 
 ```bash
+git clone git@github.com:mr-cheng111/LeggedLab.git
+# 或
+# git clone https://github.com/mr-cheng111/LeggedLab.git
+
 cd LeggedLab
 pip install -e .
 ```
 
-- Verify that the extension is correctly installed by running the following command:
+## Quick Start
+
+默认训练（当前默认 logger 为 wandb）：
+
+```bash
+python legged_lab/scripts/train.py --task=g1_flat --headless --num_envs=64
+```
+
+显式指定 logger：
 
 ```bash
 python legged_lab/scripts/train.py --task=g1_flat --headless --logger=wandb --num_envs=64
 ```
 
+策略回放：
+
+```bash
+python legged_lab/scripts/play.py --task=g1_flat --load_run=<run_dir> --checkpoint=<model_xxx.pt>
+```
+
+## Available Tasks
+
+当前注册任务包括：
+- `h1_flat`, `h1_rough`
+- `g1_flat`, `g1_rough`
+- `gr2_flat`, `gr2_rough`
+
+注册位置：`legged_lab/envs/__init__.py`
 
 ## Use Your Own Robot
 
-Assets must be converted into USD format to be compatible with Legged Lab/IsaacLab. [Convert Tutorial](https://isaac-sim.github.io/IsaacLab/main/source/how-to/import_new_asset.html).
+如需接入自己的机器人：
+1. 将机器人资产转换为 USD
+2. 在 `legged_lab/assets` 中添加资产配置
+3. 在 `legged_lab/envs` 中新增环境与 agent 配置
+4. 在 `legged_lab/envs/__init__.py` 中注册新 task
 
+参考文档：
+- https://isaac-sim.github.io/IsaacLab/main/source/how-to/import_new_asset.html
 
 ## Multi-GPU and Multi-Node Training
 
-Legged Lab supports multi-GPU and multi-node reinforcement learning using rsl_rl, the usage is exactly the same as IsaacLab. [Detailed information](https://isaac-sim.github.io/IsaacLab/main/source/features/multi_gpu.html)
+本仓库沿用 IsaacLab / rsl_rl 的并行训练方式：
+- https://isaac-sim.github.io/IsaacLab/main/source/features/multi_gpu.html
 
 ## Troubleshooting
 
-### Pylance Missing Indexing of Extensions
+### Pylance 缺少索引
 
-In some VsCode versions, the indexing of part of the extensions is missing. In this case, add the path to your extension in `.vscode/settings.json` under the key `"python.analysis.extraPaths"`.
+如果 VSCode 无法正确索引扩展，可在 `.vscode/settings.json` 增加：
 
 ```json
 {
-    "python.analysis.extraPaths": [
-        "${workspaceFolder}/legged_lab",
-        "<path-to-IsaacLab>/source/isaaclab_tasks",
-        "<path-to-IsaacLab>/source/isaaclab_mimic",
-        "<path-to-IsaacLab>/source/extensions",
-        "<path-to-IsaacLab>/source/isaaclab_assets",
-        "<path-to-IsaacLab>/source/isaaclab_rl",
-        "<path-to-IsaacLab>/source/isaaclab",
-    ]
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/legged_lab",
+    "<path-to-IsaacLab>/source/isaaclab_tasks",
+    "<path-to-IsaacLab>/source/isaaclab_mimic",
+    "<path-to-IsaacLab>/source/extensions",
+    "<path-to-IsaacLab>/source/isaaclab_assets",
+    "<path-to-IsaacLab>/source/isaaclab_rl",
+    "<path-to-IsaacLab>/source/isaaclab"
+  ]
 }
 ```
 
-## References and Thanks
-This project repository builds upon the shoulders of giants.
-* [IsaacLab](https://github.com/isaac-sim/IsaacLab)   The various reusable practical components in IsaacLab greatly simplify the complexity of LeggedLab.
-* [legged_gym](https://github.com/leggedrobotics/legged_gym)   We borrowed the code organization and environment definition logic of legged_gym and simplified it as much as possible.
-* [Protomotions](https://github.com/NVlabs/ProtoMotions)   The motivation for building this repository comes from protomotions. For the first time, we realized that we could create our own environment using only IsaacLab components without inheriting 'DirectRLEnv' or 'ManagerBasedRLEnv'.
+## Acknowledgements
+
+感谢以下开源项目：
+- IsaacLab: https://github.com/isaac-sim/IsaacLab
+- rsl_rl: https://github.com/leggedrobotics/rsl_rl
+- legged_gym: https://github.com/leggedrobotics/legged_gym
+- ProtoMotions: https://github.com/NVlabs/ProtoMotions
+
+同时特别感谢原始 LeggedLab 作者及贡献者。
 
 ## Citation
 
-If you use Legged Lab in your research, you can cite it as follows:
+如果你在学术工作中使用原始 LeggedLab，请优先引用原项目：
 
 ```bibtex
 @software{LeggedLab,
@@ -105,4 +127,49 @@ If you use Legged Lab in your research, you can cite it as follows:
   version = {1.0.0},
   year = {2025}
 }
+```
+
+如果引用本 Fork，请在文中注明基于原始 LeggedLab 的二次开发版本。
+
+## System Architecture
+
+当前 LeggedLab 的核心链路是：`scripts -> task_registry -> BaseEnv(VecEnv) -> rsl_rl(OnPolicyRunner)`。
+
+```text
+                        CLI / AppLauncher
+                               |
+                +--------------+--------------+
+                |                             |
+         scripts/train.py                scripts/play.py
+                |                             |
+                +---------- task_registry -----+
+                           (task -> cfg/class)
+                               |
+             +-----------------+-----------------+
+             |                                   |
+       EnvCfg / AgentCfg                    EnvClass(BaseEnv)
+             |                                   |
+             +-----------------+-----------------+
+                               |
+                         BaseEnv (VecEnv)
+      (Scene/Sim + CommandGenerator + RewardManager + EventManager)
+                               |
+                   obs(TensorDict), reward, done, info
+                               |
+                      rsl_rl OnPolicyRunner
+                 (PPO update / inference policy)
+                               |
+              logs, checkpoints, exported policy(jit/onnx)
+```
+
+训练时序（简化）：
+
+```text
+train.py -> get_cfgs -> BaseEnv()
+       -> OnPolicyRunner(env,cfg)
+       -> learn():
+          for iter:
+            act -> env.step -> collect rollout
+            PPO update
+            log/save
 ```
