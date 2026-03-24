@@ -85,23 +85,42 @@ def play():
     resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
     log_dir = os.path.dirname(resume_path)
 
-    runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    cfg_dict = agent_cfg.to_dict()
+    if not cfg_dict.get("obs_groups"):
+        cfg_dict["obs_groups"] = {
+            "policy": ["policy"],
+            "critic": ["critic"],
+        }
+
+    runner = OnPolicyRunner(env, cfg_dict, log_dir=log_dir, device=agent_cfg.device)
     runner.load(resume_path, load_optimizer=False)
 
     policy = runner.get_inference_policy(device=env.device)
 
     export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
-    export_policy_as_jit(runner.alg.policy, runner.obs_normalizer, path=export_model_dir, filename="policy.pt")
-    export_policy_as_onnx(
-        runner.alg.policy, normalizer=runner.obs_normalizer, path=export_model_dir, filename="policy.onnx"
-    )
+    obs_normalizer = getattr(runner, "obs_normalizer", None)
+
+    # 兼容不同 rsl_rl 版本: 部分版本没有 obs_normalizer，导出失败不应影响仿真评估主流程
+    try:
+        export_policy_as_jit(runner.alg.policy, obs_normalizer, path=export_model_dir, filename="policy.pt")
+    except TypeError:
+        export_policy_as_jit(runner.alg.policy, path=export_model_dir, filename="policy.pt")
+    except Exception as exc:
+        print(f"[WARN] Failed to export JIT policy: {exc}")
+
+    try:
+        export_policy_as_onnx(runner.alg.policy, normalizer=obs_normalizer, path=export_model_dir, filename="policy.onnx")
+    except TypeError:
+        export_policy_as_onnx(runner.alg.policy, path=export_model_dir, filename="policy.onnx")
+    except Exception as exc:
+        print(f"[WARN] Failed to export ONNX policy: {exc}")
 
     if not args_cli.headless:
         from legged_lab.utils.keyboard import Keyboard
 
         keyboard = Keyboard(env)  # noqa:F841
 
-    obs, _ = env.get_observations()
+    obs = env.get_observations()
 
     while simulation_app.is_running():
 

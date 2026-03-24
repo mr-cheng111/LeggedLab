@@ -53,7 +53,7 @@ pip install -e .
 - Verify that the extension is correctly installed by running the following command:
 
 ```bash
-python legged_lab/scripts/train.py --task=g1_flat --headless --logger=tensorboard --num_envs=64
+python legged_lab/scripts/train.py --task=g1_flat --headless --logger=wandb --num_envs=64
 ```
 
 
