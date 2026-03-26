@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import random
 from typing import TYPE_CHECKING
 
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
 # 默认 wandb 参数（可被命令行覆盖）
 DEFAULT_WANDB_ENTITY = ""
 DEFAULT_WANDB_MODE = "online"
-DEFAULT_WANDB_API_KEY = ""
+DEFAULT_WANDB_API_KEY = os.environ.get("WANDB_API_KEY", "")
 
 
 def add_rsl_rl_args(parser: argparse.ArgumentParser):
@@ -64,7 +65,7 @@ def add_rsl_rl_args(parser: argparse.ArgumentParser):
         choices={"online", "offline", "disabled"},
         help="Wandb mode.",
     )
-    arg_group.add_argument("--wandb_api_key", type=str, default=DEFAULT_WANDB_API_KEY, help="Wandb API key.")
+    arg_group.add_argument("--wandb_api_key", type=str, default=DEFAULT_WANDB_API_KEY, help="Wandb API key (default from WANDB_API_KEY env).")
 
     arg_group.add_argument(
         "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
