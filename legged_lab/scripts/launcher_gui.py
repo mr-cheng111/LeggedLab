@@ -88,36 +88,12 @@ class LauncherGUI:
         except Exception:
             pass
 
-        ui_family = self._pick_font_family(
-            [
-                "Noto Sans CJK SC",
-                "Source Han Sans SC",
-                "Source Han Sans CN",
-                "HarmonyOS Sans SC",
-                "Microsoft YaHei UI",
-                "PingFang SC",
-                "Microsoft YaHei",
-                "微软雅黑",
-                "WenQuanYi Zen Hei",
-                "Ubuntu",
-                "Liberation Sans",
-                "Helvetica Neue",
-                "DejaVu Sans",
-                "Arial",
-            ]
-        )
-        mono_family = self._pick_font_family(
-            [
-                "JetBrains Mono",
-                "Iosevka",
-                "Fira Code",
-                "Cascadia Code",
-                "Consolas",
-                "Menlo",
-                "Monaco",
-                "DejaVu Sans Mono",
-            ],
-            fallback="TkFixedFont",
+        # 用户指定：统一使用 Ubuntu 字体族
+        ui_family = "Ubuntu" if "Ubuntu" in set(tkfont.families(self.root)) else self._pick_font_family(["Ubuntu"])
+        mono_family = (
+            "Ubuntu Mono"
+            if "Ubuntu Mono" in set(tkfont.families(self.root))
+            else self._pick_font_family(["Ubuntu Mono", "DejaVu Sans Mono"], fallback="TkFixedFont")
         )
 
         # 强制覆盖 Tk 命名字体，避免回退到位图字体

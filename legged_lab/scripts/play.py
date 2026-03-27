@@ -56,8 +56,8 @@ def play():
     env_cfg.scene.max_episode_length_s = 40.0
     env_cfg.scene.num_envs = 50
     env_cfg.scene.env_spacing = 2.5
-    env_cfg.commands.ranges.lin_vel_x = (0.6, 0.6)
-    env_cfg.commands.ranges.lin_vel_y = (0.0, 0.0)
+    env_cfg.commands.ranges.lin_vel_x = (-0.6, 0.6)
+    env_cfg.commands.ranges.lin_vel_y = (0.0, 1.0)
     env_cfg.commands.ranges.heading = (0.0, 0.0)
     env_cfg.scene.height_scanner.drift_range = (0.0, 0.0)
 
