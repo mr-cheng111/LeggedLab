@@ -59,6 +59,17 @@ python legged_lab/scripts/train.py --task=g1_flat --headless --logger=wandb --nu
 python legged_lab/scripts/play.py --task=g1_flat --load_run=<run_dir> --checkpoint=<model_xxx.pt>
 ```
 
+可视化启动器（可填写 train/play 参数并一键运行）：
+
+```bash
+python legged_lab/scripts/launcher_gui.py
+```
+
+说明：
+- 启动器会优先通过 `train.py --help` / `play.py --help` 自动提取参数（包含 IsaacLab `AppLauncher` 参数）
+- 如果当前环境未正确安装 IsaacLab，会回退到源码解析（此时不含 `AppLauncher` 动态参数）
+- 可通过“额外参数”输入框补充任意原生命令行参数
+
 ## Available Tasks
 
 当前注册任务包括：
