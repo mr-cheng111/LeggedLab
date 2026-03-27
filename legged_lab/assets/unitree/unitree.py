@@ -20,7 +20,7 @@ Reference: https://github.com/unitreerobotics/unitree_ros
 """
 
 import isaaclab.sim as sim_utils
-from isaaclab.actuators import ImplicitActuatorCfg
+from isaaclab.actuators import IdealPDActuatorCfg, ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 
 from legged_lab.assets import ISAAC_ASSET_DIR
@@ -275,6 +275,65 @@ G1_CFG = ArticulationCfg(
             stiffness=40.0,
             damping=2.0,
             armature=0.01,
+        ),
+    },
+)
+
+
+# B2 的标准关节顺序（用于 SDK/策略动作映射，不作为 ArticulationCfg 构造参数）
+B2_JOINT_SDK_NAMES = [
+    "FR_hip_joint", "FR_thigh_joint", "FR_calf_joint",
+    "FL_hip_joint", "FL_thigh_joint", "FL_calf_joint",
+    "RR_hip_joint", "RR_thigh_joint", "RR_calf_joint",
+    "RL_hip_joint", "RL_thigh_joint", "RL_calf_joint",
+]
+
+
+B2_CFG = ArticulationCfg(
+    spawn=sim_utils.UsdFileCfg(
+        usd_path=f"{ISAAC_ASSET_DIR}/unitree/b2/b2.usd",
+        activate_contact_sensors=True,
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            disable_gravity=False,
+            retain_accelerations=False,
+            linear_damping=0.0,
+            angular_damping=0.0,
+            max_linear_velocity=1000.0,
+            max_angular_velocity=1000.0,
+            max_depenetration_velocity=1.0,
+        ),
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=True, solver_position_iteration_count=4, solver_velocity_iteration_count=1
+        ),
+    ),
+    init_state=ArticulationCfg.InitialStateCfg(
+        pos=(0.0, 0.0, 0.58),
+        joint_pos={
+            ".*R_hip_joint": -0.1,
+            ".*L_hip_joint": 0.1,
+            "F[L,R]_thigh_joint": 0.8,
+            "R[L,R]_thigh_joint": 1.0,
+            ".*_calf_joint": -1.5,
+        },
+        joint_vel={".*": 0.0},
+    ),
+    soft_joint_pos_limit_factor=0.90,
+    actuators={
+        "M107-24-2": IdealPDActuatorCfg(
+            joint_names_expr=[".*_hip_.*", ".*_thigh_.*"],
+            effort_limit=200,
+            velocity_limit=23,
+            stiffness=160.0,
+            damping=5.0,
+            friction=0.01,
+        ),
+        "2": IdealPDActuatorCfg(
+            joint_names_expr=[".*_calf_.*"],
+            effort_limit=320,
+            velocity_limit=14,
+            stiffness=160.0,
+            damping=5.0,
+            friction=0.01,
         ),
     },
 )
