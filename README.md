@@ -109,6 +109,43 @@ python legged_lab/scripts/launcher_gui.py
 本仓库沿用 IsaacLab / rsl_rl 的并行训练方式：
 - https://isaac-sim.github.io/IsaacLab/main/source/features/multi_gpu.html
 
+## WMP RSSM World Model Smoke Test
+
+当前分支已开始移植 WMP（World Model-based Perception for Visual Legged Locomotion）的 RSSM 世界模型到
+`b2_rgbd`。本阶段只提供模型前向检查，不接入 PPO 联训，也不改变现有 `b2_rgbd_*` 训练观测。
+
+当前链路：
+
+```text
+b2_rgbd Gemini2 depth
+      -> clean/clip/normalize
+      -> resize to 1x64x64 (NCHW)
+      -> convert to WMP image format 64x64x1 (NHWC)
+      -> WMP MultiEncoder
+      -> RSSM obs_step
+      -> deter feature(512) / full feature(1536)
+      -> MultiDecoder image reconstruction smoke test
+```
+
+运行检查：
+
+```bash
+env CONDA_PREFIX=/home/tower/miniconda/envs/isaaclab \
+/home/tower/Bags/IsaacLab/isaaclab.sh -p legged_lab/scripts/inspect_wmp_world_model.py \
+  --task=b2_rgbd_rough \
+  --num_envs=1 \
+  --headless \
+  --enable_cameras \
+  --steps=5
+```
+
+预期输出包含：
+- `depth preprocessed NCHW shape=(1, 1, 64, 64)`
+- `WMP image NHWC shape=(1, 64, 64, 1)`
+- `RSSM deter feature shape=(1, 512)`
+- `RSSM full feature shape=(1, 1536)`
+- `decoded image shape=(1, 64, 64, 1)`
+
 ## Troubleshooting
 
 ### Pylance 缺少索引
