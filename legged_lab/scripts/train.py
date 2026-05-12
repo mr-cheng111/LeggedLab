@@ -43,6 +43,7 @@ from isaaclab_tasks.utils import get_checkpoint_path
 
 from legged_lab.envs import *  # noqa:F401, F403
 from legged_lab.utils.cli_args import update_rsl_rl_cfg
+from legged_lab.utils.rsl_rl_compat import adapt_legacy_cfg_for_rsl_rl_v5, is_rsl_rl_v5_plus
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -103,20 +104,16 @@ def train():
         log_dir += f"_{agent_cfg.run_name}"
     log_dir = os.path.join(log_root_path, log_dir)
     cfg_dict = agent_cfg.to_dict()
-
-    print("\n========== agent cfg keys ==========")
-    print(cfg_dict.keys())
-    print("\n========== obs_groups before ==========")
-    print(cfg_dict.get("obs_groups", None))
-
     if not cfg_dict.get("obs_groups"):
+        # 旧代码路径默认键名为 policy/critic，这里保留默认语义。
         cfg_dict["obs_groups"] = {
             "policy": ["policy"],
             "critic": ["critic"],
         }
-
-    print("\n========== obs_groups after ==========")
-    print(cfg_dict["obs_groups"])
+    # 兼容 rsl_rl 5.x：自动把旧配置映射到 actor/critic。
+    if is_rsl_rl_v5_plus():
+        print("[INFO] Detected rsl_rl v5+, applying legacy cfg compatibility mapping.")
+        cfg_dict = adapt_legacy_cfg_for_rsl_rl_v5(cfg_dict)
 
     runner = OnPolicyRunner(
         env,

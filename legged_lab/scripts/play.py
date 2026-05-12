@@ -42,6 +42,7 @@ from isaaclab_tasks.utils import get_checkpoint_path
 
 from legged_lab.envs import *  # noqa:F401, F403
 from legged_lab.utils.cli_args import update_rsl_rl_cfg
+from legged_lab.utils.rsl_rl_compat import adapt_legacy_cfg_for_rsl_rl_v5, is_rsl_rl_v5_plus
 
 
 def play():
@@ -91,27 +92,53 @@ def play():
             "policy": ["policy"],
             "critic": ["critic"],
         }
+    if is_rsl_rl_v5_plus():
+        print("[INFO] Detected rsl_rl v5+, applying legacy cfg compatibility mapping.")
+        cfg_dict = adapt_legacy_cfg_for_rsl_rl_v5(cfg_dict)
 
     runner = OnPolicyRunner(env, cfg_dict, log_dir=log_dir, device=agent_cfg.device)
-    runner.load(resume_path, load_optimizer=False)
+    if is_rsl_rl_v5_plus():
+        # rsl_rl 5.x: load() 使用 load_cfg，不再支持 load_optimizer 参数。
+        runner.load(
+            resume_path,
+            load_cfg={
+                "actor": True,
+                "critic": True,
+                "optimizer": False,
+                "iteration": True,
+                "rnd": False,
+            },
+            map_location=agent_cfg.device,
+        )
+    else:
+        # 旧版本兼容路径
+        try:
+            runner.load(resume_path, load_optimizer=False)
+        except TypeError:
+            runner.load(resume_path)
 
     policy = runner.get_inference_policy(device=env.device)
 
     export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
     obs_normalizer = getattr(runner, "obs_normalizer", None)
+    export_policy = getattr(getattr(runner, "alg", None), "policy", None)
+    if export_policy is None and hasattr(getattr(runner, "alg", None), "get_policy"):
+        export_policy = runner.alg.get_policy()
+    if export_policy is None:
+        export_policy = policy
 
     # 兼容不同 rsl_rl 版本: 部分版本没有 obs_normalizer，导出失败不应影响仿真评估主流程
     try:
-        export_policy_as_jit(runner.alg.policy, obs_normalizer, path=export_model_dir, filename="policy.pt")
+        export_policy_as_jit(export_policy, obs_normalizer, path=export_model_dir, filename="policy.pt")
     except TypeError:
-        export_policy_as_jit(runner.alg.policy, path=export_model_dir, filename="policy.pt")
+        export_policy_as_jit(export_policy, path=export_model_dir, filename="policy.pt")
     except Exception as exc:
         print(f"[WARN] Failed to export JIT policy: {exc}")
 
     try:
-        export_policy_as_onnx(runner.alg.policy, normalizer=obs_normalizer, path=export_model_dir, filename="policy.onnx")
+        export_policy_as_onnx(export_policy, normalizer=obs_normalizer, path=export_model_dir, filename="policy.onnx")
     except TypeError:
-        export_policy_as_onnx(runner.alg.policy, path=export_model_dir, filename="policy.onnx")
+        export_policy_as_onnx(export_policy, path=export_model_dir, filename="policy.onnx")
     except Exception as exc:
         print(f"[WARN] Failed to export ONNX policy: {exc}")
 

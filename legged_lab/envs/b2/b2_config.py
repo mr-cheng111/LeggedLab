@@ -99,7 +99,7 @@ class B2RewardCfg(RewardCfg):
         },
     )
 
-    # 足端受力奖励（当前权重 0，默认关闭）
+    # 足端受力奖励（当前权重 0）
     feet_force = RewTerm(
         func=mdp.body_force,
         weight=0.0,

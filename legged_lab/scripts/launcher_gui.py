@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 from dataclasses import dataclass
@@ -66,6 +67,8 @@ class LauncherGUI:
         self.process: subprocess.Popen | None = None
         self.reader_thread: threading.Thread | None = None
         self.log_queue: queue.Queue[str] = queue.Queue()
+        # 记录本启动器创建的进程组，关闭 GUI 时统一清理
+        self.started_pgroups: set[int] = set()
 
         self._configure_style()
         self._build_layout()
@@ -712,15 +715,26 @@ class LauncherGUI:
         self._append_log(f"[INFO] 启动 {script_name}: {' '.join(shlex.quote(item) for item in cmd)}\n")
 
         try:
-            self.process = subprocess.Popen(
+            popen_kwargs = dict(
                 cmd,
                 cwd=str(self.repo_root),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                preexec_fn=os.setsid if os.name != "nt" else None,
             )
+            if os.name == "nt":
+                # Windows: 创建新进程组，便于后续整组停止
+                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                # POSIX: 创建新会话，子进程成为新的进程组组长
+                popen_kwargs["start_new_session"] = True
+            self.process = subprocess.Popen(**popen_kwargs)
+            if os.name != "nt":
+                try:
+                    self.started_pgroups.add(os.getpgid(self.process.pid))
+                except Exception:
+                    pass
         except Exception as exc:
             self._append_log(f"[ERROR] 启动失败: {exc}\n")
             self.process = None
@@ -739,12 +753,92 @@ class LauncherGUI:
         self._start(script_name)
 
     def _read_process_output(self) -> None:
-        if self.process is None or self.process.stdout is None:
+        proc = self.process
+        if proc is None or proc.stdout is None:
             return
-        for line in self.process.stdout:
+        for line in proc.stdout:
             self.log_queue.put(line)
-        rc = self.process.wait()
+        rc = proc.wait()
         self.log_queue.put(f"\n[INFO] 进程结束，返回码: {rc}\n")
+        if self.process is proc:
+            self.process = None
+
+    def _terminate_process(self, proc: subprocess.Popen, wait_timeout: float = 5.0) -> bool:
+        """优雅停止进程；超时后强制杀掉，确保仿真不残留。"""
+        if proc.poll() is not None:
+            return True
+
+        try:
+            if os.name == "nt":
+                proc.terminate()
+            else:
+                try:
+                    pgid = os.getpgid(proc.pid)
+                    self.started_pgroups.add(pgid)
+                    os.killpg(pgid, signal.SIGTERM)
+                except ProcessLookupError:
+                    return True
+                except Exception:
+                    proc.terminate()
+            proc.wait(timeout=wait_timeout)
+            return True
+        except subprocess.TimeoutExpired:
+            self._append_log("[WARN] 进程未在超时时间内退出，正在强制停止...\n")
+            try:
+                if os.name == "nt":
+                    proc.kill()
+                else:
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    except Exception:
+                        proc.kill()
+            except Exception as exc:
+                self._append_log(f"[WARN] 强制停止失败: {exc}\n")
+            try:
+                proc.wait(timeout=2.0)
+            except Exception:
+                pass
+            return proc.poll() is not None
+        except Exception as exc:
+            self._append_log(f"[WARN] 停止进程异常: {exc}\n")
+            return proc.poll() is not None
+
+    def _cleanup_remaining_pgroups(self) -> None:
+        """兜底清理：关闭 GUI 时再清理一次历史进程组。"""
+        if os.name == "nt" or not self.started_pgroups:
+            return
+
+        alive: set[int] = set()
+        for pgid in list(self.started_pgroups):
+            try:
+                os.killpg(pgid, 0)
+                alive.add(pgid)
+            except ProcessLookupError:
+                self.started_pgroups.discard(pgid)
+            except Exception:
+                # 无权限/不可检测时，保守处理为可能存活
+                alive.add(pgid)
+
+        if not alive:
+            return
+
+        for pgid in alive:
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except Exception:
+                pass
+        time.sleep(0.3)
+        for pgid in alive:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except Exception:
+                pass
 
     def _stop(self) -> None:
         if self.process is None or self.process.poll() is not None:
@@ -752,13 +846,14 @@ class LauncherGUI:
             return
 
         self._append_log("[INFO] 正在停止进程...\n")
-        try:
-            if os.name == "nt":
-                self.process.terminate()
-            else:
-                os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
-        except Exception as exc:
-            self._append_log(f"[WARN] 停止失败: {exc}\n")
+        proc = self.process
+        ok = self._terminate_process(proc, wait_timeout=5.0)
+        if ok:
+            self._append_log("[INFO] 已停止当前任务及其仿真子进程。\n")
+        else:
+            self._append_log("[WARN] 进程可能仍在运行，请手动检查。\n")
+        if self.process is proc:
+            self.process = None
 
     def _poll_logs(self) -> None:
         while True:
@@ -805,6 +900,11 @@ class LauncherGUI:
     def _on_close(self) -> None:
         if self.process is not None and self.process.poll() is None:
             self._stop()
+        # 关闭窗口前等待日志线程短暂退出，避免竞态输出
+        if self.reader_thread is not None and self.reader_thread.is_alive():
+            self.reader_thread.join(timeout=1.0)
+        # 再做一次进程组兜底清理，确保 launcher 拉起的仿真都被停掉
+        self._cleanup_remaining_pgroups()
         self.root.destroy()
 
 
