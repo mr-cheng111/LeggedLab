@@ -37,6 +37,24 @@ class HeightScannerCfg:
 
 
 @configclass
+class Gemini2CameraCfg:
+    """Orbbec Gemini2 RGBD 相机配置。
+
+    相机 prim 已经存在于机器人 USD 中，因此 SceneCfg 中使用 spawn=None 绑定已有 prim。
+    """
+
+    enable: bool = False
+    rgb_camera_path: str = "base_link/RGBD_link/Gemini2/Orbbec_Gemini2/camera_rgb/camera_rgb/Stream_rgb"
+    depth_camera_path: str = "base_link/RGBD_link/Gemini2/Orbbec_Gemini2/camera_ir_left/camera_left/Stream_depth"
+    width: int = 320
+    height: int = 180
+    update_period: float = 0.0
+    depth_near: float = 0.15
+    depth_far: float = 10.0
+    depth_clipping_behavior: str = "none"
+
+
+@configclass
 class BaseSceneCfg:
     max_episode_length_s: float = 20.0
     num_envs: int = 4096
@@ -46,6 +64,7 @@ class BaseSceneCfg:
     terrain_generator: TerrainGeneratorCfg = None
     max_init_terrain_level: int = 5
     height_scanner: HeightScannerCfg = HeightScannerCfg()
+    gemini2_camera: Gemini2CameraCfg = Gemini2CameraCfg()
 
 
 @configclass

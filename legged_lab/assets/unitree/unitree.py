@@ -337,3 +337,8 @@ B2_CFG = ArticulationCfg(
         ),
     },
 )
+
+
+B2_RGBD_CFG = B2_CFG.replace(
+    spawn=B2_CFG.spawn.replace(usd_path=f"{ISAAC_ASSET_DIR}/unitree/b2_rgbd/b2_rgbd.usd")
+)

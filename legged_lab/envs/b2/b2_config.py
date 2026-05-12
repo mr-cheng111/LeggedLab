@@ -17,7 +17,7 @@ from isaaclab.managers.scene_entity_cfg import SceneEntityCfg
 from isaaclab.utils import configclass
 
 import legged_lab.mdp as mdp
-from legged_lab.assets.unitree import B2_CFG
+from legged_lab.assets.unitree import B2_CFG, B2_RGBD_CFG
 from legged_lab.envs.base.base_env_config import (  # noqa:F401
     BaseAgentCfg,
     BaseEnvCfg,
@@ -201,3 +201,45 @@ class B2RoughAgentCfg(BaseAgentCfg):
         self.policy.rnn_hidden_size = 256
         self.policy.rnn_num_layers = 1
         self.policy.rnn_type = "lstm"
+
+
+@configclass
+class B2RGBDFlatEnvCfg(B2FlatEnvCfg):
+    """B2 RGBD 平地环境配置。
+
+    当前仅切换机器人 USD 资产到 b2_rgbd 版本；PPO 观测仍沿用本体观测。
+    后续世界模型训练可在该任务上接入 RGBD 相机数据。
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.robot = B2_RGBD_CFG
+        self.scene.height_scanner.prim_body_name = "base_link"
+        self.scene.gemini2_camera.enable = True
+
+
+@configclass
+class B2RGBDFlatAgentCfg(B2FlatAgentCfg):
+    """B2 RGBD 平地任务训练器配置。"""
+
+    experiment_name: str = "b2_rgbd_flat"
+    wandb_project: str = "b2_rgbd_flat"
+
+
+@configclass
+class B2RGBDRoughEnvCfg(B2RoughEnvCfg):
+    """B2 RGBD 复杂地形环境配置。"""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.robot = B2_RGBD_CFG
+        self.scene.height_scanner.prim_body_name = "base_link"
+        self.scene.gemini2_camera.enable = True
+
+
+@configclass
+class B2RGBDRoughAgentCfg(B2RoughAgentCfg):
+    """B2 RGBD 复杂地形任务训练器配置。"""
+
+    experiment_name: str = "b2_rgbd_rough"
+    wandb_project: str = "b2_rgbd_rough"

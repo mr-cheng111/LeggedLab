@@ -33,6 +33,10 @@ from legged_lab.envs.h1.h1_config import (
 from legged_lab.envs.b2.b2_config import (
     B2FlatAgentCfg,
     B2FlatEnvCfg,
+    B2RGBDFlatAgentCfg,
+    B2RGBDFlatEnvCfg,
+    B2RGBDRoughAgentCfg,
+    B2RGBDRoughEnvCfg,
     B2RoughAgentCfg,
     B2RoughEnvCfg,
 )
@@ -47,3 +51,5 @@ task_registry.register("gr2_rough", BaseEnv, GR2RoughEnvCfg(), GR2RoughAgentCfg(
 
 task_registry.register("b2_flat", BaseEnv, B2FlatEnvCfg(), B2FlatAgentCfg())
 task_registry.register("b2_rough", BaseEnv, B2RoughEnvCfg(), B2RoughAgentCfg())
+task_registry.register("b2_rgbd_flat", BaseEnv, B2RGBDFlatEnvCfg(), B2RGBDFlatAgentCfg())
+task_registry.register("b2_rgbd_rough", BaseEnv, B2RGBDRoughEnvCfg(), B2RGBDRoughAgentCfg())
