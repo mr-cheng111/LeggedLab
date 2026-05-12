@@ -3,6 +3,7 @@
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
 import torch
@@ -17,6 +18,12 @@ parser.add_argument("--steps", type=int, default=30, help="Number of zero-action
 parser.add_argument("--save_dir", type=str, default="logs/rgbd_preview", help="Directory for saved images.")
 parser.add_argument("--save_images", action="store_true", help="Save RGB and depth preview images.")
 parser.add_argument("--terrain", choices=("task", "plane"), default="task", help="Terrain to render.")
+parser.add_argument(
+    "--wmp_terrain",
+    choices=("slope", "stair", "gap", "climb", "tilt", "crawl"),
+    default=None,
+    help="Override task terrain with a single WMP-style terrain preset.",
+)
 parser.add_argument(
     "--rgb_camera_path",
     type=str,
@@ -39,6 +46,7 @@ from isaaclab.sensors import TiledCameraCfg
 from isaaclab.sensors.camera.utils import save_images_to_file
 
 from legged_lab.envs import *  # noqa:F401, F403
+from legged_lab.terrains import WMP_TERRAIN_CFGS
 
 
 def _normalize_depth(depth: torch.Tensor, near: float, far: float) -> torch.Tensor:
@@ -60,6 +68,10 @@ def main():
     if args_cli.terrain == "plane":
         env_cfg.scene.terrain_type = "plane"
         env_cfg.scene.terrain_generator = None
+    if args_cli.wmp_terrain is not None:
+        env_cfg.scene.terrain_type = "generator"
+        env_cfg.scene.terrain_generator = WMP_TERRAIN_CFGS[args_cli.wmp_terrain]
+        env_cfg.scene.max_init_terrain_level = 0
     if args_cli.device is not None:
         env_cfg.device = args_cli.device
 
@@ -119,7 +131,11 @@ def main():
         actions = torch.zeros(env.num_envs, env.num_actions, device=env.device)
         env.step(actions)
 
+    if hasattr(env, "close"):
+        env.close()
     simulation_app.close()
+    if args_cli.headless:
+        sys.exit(0)
 
 
 if __name__ == "__main__":
