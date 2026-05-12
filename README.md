@@ -1,9 +1,9 @@
 # LeggedLab (Fork by mr-cheng111)
 
-[![IsaacSim](https://img.shields.io/badge/IsaacSim-4.5.0-silver.svg)](https://docs.omniverse.nvidia.com/isaacsim/latest/overview.html)
-[![Isaac Lab](https://img.shields.io/badge/IsaacLab-2.1.0-silver)](https://isaac-sim.github.io/IsaacLab)
-[![RSL_RL](https://img.shields.io/badge/RSL_RL-3.1.2-silver)](https://github.com/leggedrobotics/rsl_rl)
-[![Python](https://img.shields.io/badge/python-3.10-blue.svg)](https://docs.python.org/3/whatsnew/3.10.html)
+[![IsaacSim](https://img.shields.io/badge/IsaacSim-5.1.0.0-silver.svg)](https://docs.omniverse.nvidia.com/isaacsim/latest/overview.html)
+[![Isaac Lab](https://img.shields.io/badge/IsaacLab-0.54.3-silver)](https://isaac-sim.github.io/IsaacLab)
+[![RSL_RL](https://img.shields.io/badge/RSL_RL-5.0.1-silver)](https://github.com/leggedrobotics/rsl_rl)
+[![Python](https://img.shields.io/badge/python-3.11-blue.svg)](https://docs.python.org/3/whatsnew/3.11.html)
 [![License](https://img.shields.io/badge/license-BSD--3-yellow.svg)](https://opensource.org/licenses/BSD-3-Clause)
 
 ## Overview
@@ -28,6 +28,13 @@
 建议先安装 Isaac Lab（推荐 conda 方式）：
 - Isaac Lab install guide: https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html
 
+当前维护环境：
+- conda 环境：`isaaclab`
+- Python：`3.11`
+- IsaacSim：`5.1.0.0`
+- IsaacLab：`0.54.3`
+- rsl_rl / rsl-rl-lib：`5.0.1`
+
 然后克隆本仓库：
 
 ```bash
@@ -40,6 +47,13 @@ pip install -e .
 ```
 
 ## Quick Start
+
+进入训练环境：
+
+```bash
+conda activate isaaclab
+cd /home/tower/Bags/LeggedLab
+```
 
 默认训练（当前默认 logger 为 wandb）：
 
