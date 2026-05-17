@@ -44,6 +44,14 @@ cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
+if args_cli.show_depth_points:
+    debug_draw_enable_arg = "--enable isaacsim.util.debug_draw"
+    args_cli.kit_args = (
+        f"{args_cli.kit_args} {debug_draw_enable_arg}".strip()
+        if getattr(args_cli, "kit_args", None)
+        else debug_draw_enable_arg
+    )
+
 # launch omniverse app
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -53,15 +61,24 @@ from isaaclab.sensors import patterns
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab.utils.math import quat_apply
 
-try:
-    from isaacsim.util.debug_draw import _debug_draw
-except ModuleNotFoundError:
-    from omni.isaac.debug_draw import _debug_draw
-
 from legged_lab.envs import *  # noqa:F401, F403
 from legged_lab.utils.cli_args import update_rsl_rl_cfg
 from legged_lab.utils.rsl_rl_compat import adapt_legacy_cfg_for_rsl_rl_v5, is_rsl_rl_v5_plus
 from legged_lab.world_models.wmp import depth_to_wmp_image
+
+
+def _acquire_debug_draw_interface():
+    try:
+        from isaacsim.util.debug_draw import _debug_draw
+    except ModuleNotFoundError:
+        try:
+            from omni.isaac.debug_draw import _debug_draw
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                "Debug draw is unavailable in this IsaacSim environment. "
+                "Run without --show_depth_points, or install/enable the debug draw extension."
+            ) from exc
+    return _debug_draw.acquire_debug_draw_interface()
 
 
 def _depth_to_hit_points(
@@ -236,7 +253,7 @@ def play():
     wm_action = torch.zeros(env.num_envs, env.num_actions, device=getattr(runner, "wm_device", env.device))
     wm_is_first = torch.ones(env.num_envs, device=getattr(runner, "wm_device", env.device))
     depth_camera = env.scene.sensors.get("gemini2_depth_camera") if args_cli.show_depth_points else None
-    depth_draw = _debug_draw.acquire_debug_draw_interface() if args_cli.show_depth_points else None
+    depth_draw = _acquire_debug_draw_interface() if args_cli.show_depth_points else None
     if depth_camera is not None:
         # TiledCamera 默认返回初始化时的相机位姿；红点需要跟随机器人上的 Gemini2，
         # 因此播放调试时开启最新位姿更新。

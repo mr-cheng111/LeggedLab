@@ -43,6 +43,7 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 import os
 import gc
+import traceback
 from datetime import datetime
 
 import torch
@@ -132,8 +133,10 @@ def train():
             print("[INFO] Detected rsl_rl v5+, applying legacy cfg compatibility mapping.")
             cfg_dict = adapt_legacy_cfg_for_rsl_rl_v5(cfg_dict)
 
-        runner_cls = OnPolicyRunner
-        if args_cli.runner == "wmp_amp":
+        if args_cli.runner == "default":
+            runner_class_name = getattr(agent_cfg, "runner_class_name", "rsl_rl.runners:OnPolicyRunner")
+            runner_cls = resolve_callable(runner_class_name)
+        elif args_cli.runner == "wmp_amp":
             runner_cls = resolve_callable(getattr(agent_cfg, "runner_class_name", "legged_lab.runners.wmp_amp_runner:WMPAMPRunner"))
         elif args_cli.runner == "amp_ppo":
             runner_cls = resolve_callable(getattr(agent_cfg, "runner_class_name", "legged_lab.runners.amp_ppo_runner:AMPPPORunner"))
@@ -166,6 +169,10 @@ def train():
             return
 
         runner.learn(num_learning_iterations=remaining_iterations, init_at_random_ep_len=True)
+    except Exception:
+        print("[ERROR] Training failed with exception:")
+        traceback.print_exc()
+        raise
     finally:
         if env is not None and hasattr(env, "close"):
             try:

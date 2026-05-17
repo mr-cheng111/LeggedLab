@@ -46,17 +46,29 @@ def adapt_legacy_cfg_for_rsl_rl_v5(cfg_dict: dict) -> dict:
 
     out = copy.deepcopy(cfg_dict)
 
-    # 已是新格式则直接返回。
-    if "actor" in out and "critic" in out:
+    def _is_complete_model_cfg(model_cfg: object, *, needs_distribution: bool) -> bool:
+        if not isinstance(model_cfg, dict):
+            return False
+        if not model_cfg.get("class_name"):
+            return False
+        if not model_cfg.get("hidden_dims"):
+            return False
+        if not model_cfg.get("activation"):
+            return False
+        if needs_distribution and not isinstance(model_cfg.get("distribution_cfg"), dict):
+            return False
+        return True
+
+    # 已是完整新格式则直接返回；不完整时继续从 legacy policy 重建。
+    if _is_complete_model_cfg(out.get("actor"), needs_distribution=True) and _is_complete_model_cfg(
+        out.get("critic"), needs_distribution=False
+    ):
         obs_groups = out.get("obs_groups") or {}
         if "actor" not in obs_groups and "policy" in obs_groups:
             obs_groups["actor"] = obs_groups.pop("policy")
         if "critic" not in obs_groups:
             obs_groups["critic"] = ["critic"]
         out["obs_groups"] = obs_groups
-        return out
-
-    if out.get("actor") and out.get("critic"):
         return out
 
     policy = out.get("policy")

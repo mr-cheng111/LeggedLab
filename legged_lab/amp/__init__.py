@@ -5,6 +5,14 @@ from .discriminator import AMPDiscriminator
 from .motion_loader import AMPLoader, AMPMotionDataset
 from .normalizer import Normalizer
 from .replay_buffer import AMPReplayBuffer
-from .retarget import NoOpRetargetAdapter
+from .retarget import A1CanonicalRetargetAdapter, NoOpRetargetAdapter
 
-__all__ = ["AMPDiscriminator", "AMPLoader", "AMPMotionDataset", "AMPReplayBuffer", "NoOpRetargetAdapter", "Normalizer"]
+__all__ = [
+    "A1CanonicalRetargetAdapter",
+    "AMPDiscriminator",
+    "AMPLoader",
+    "AMPMotionDataset",
+    "AMPReplayBuffer",
+    "NoOpRetargetAdapter",
+    "Normalizer",
+]

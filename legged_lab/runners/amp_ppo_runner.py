@@ -49,6 +49,8 @@ class AMPPPORunner:
         retarget_cfg = amp_cfg.get("retarget_adapter", {}) or {}
         retarget_class_path = retarget_cfg.get("class_path", "legged_lab.amp.retarget:NoOpRetargetAdapter")
         retarget_kwargs = {k: v for k, v in retarget_cfg.items() if k != "class_path"}
+        if retarget_kwargs.get("target_joint_order") == "env":
+            retarget_kwargs["target_joint_order"] = list(self.env.robot.joint_names)
         retarget_adapter = resolve_callable(retarget_class_path)(
             canonical_obs_dim=int(amp_cfg.get("canonical_obs_dim", 30)),
             **retarget_kwargs,
@@ -72,6 +74,10 @@ class AMPPPORunner:
             task_reward_lerp=0.0,
         ).to(self.device)
         normalizer = Normalizer(amp_data.observation_dim, device=self.device)
+        if amp_cfg.get("preload_normalizer", True):
+            expert_state, expert_next_state = amp_data.get_preloaded_transitions()
+            normalizer.update(expert_state)
+            normalizer.update(expert_next_state)
         self.amp_reward_weight = float(amp_cfg.get("amp_reward_weight", 1.0))
         self.task_reward_weight = float(amp_cfg.get("task_reward_weight", 1.0))
         self.alg.attach_amp(

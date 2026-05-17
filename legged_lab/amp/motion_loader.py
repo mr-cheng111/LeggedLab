@@ -98,6 +98,11 @@ class AMPMotionDataset:
             self.preloaded_s = self._full_to_amp_obs(self.get_frame_at_time_batch(traj_idxs, times))
             self.preloaded_s_next = self._full_to_amp_obs(self.get_frame_at_time_batch(traj_idxs, times + time_between_frames))
 
+    def get_preloaded_transitions(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.preload_transitions:
+            raise RuntimeError("AMP motion transitions were not preloaded.")
+        return self.preloaded_s, self.preloaded_s_next
+
     def weighted_traj_idx_sample_batch(self, size: int):
         return np.random.choice(self.trajectory_idxs, size=size, p=self.trajectory_weights, replace=True)
 

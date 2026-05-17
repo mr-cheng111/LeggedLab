@@ -59,6 +59,8 @@ class AMPPPO(PPO):
         mean_surrogate_loss = 0.0
         mean_entropy = 0.0
         mean_amp_loss = 0.0
+        mean_policy_loss = 0.0
+        mean_expert_loss = 0.0
         mean_grad_pen = 0.0
         mean_policy_pred = 0.0
         mean_expert_pred = 0.0
@@ -117,7 +119,6 @@ class AMPPPO(PPO):
             expert_state, expert_next_state = expert_batch
             raw_policy_state = policy_state
             raw_expert_state = expert_state
-            raw_expert_next_state = expert_next_state
             with torch.no_grad():
                 policy_state = self.amp_normalizer.normalize_torch(policy_state, self.device)
                 policy_next_state = self.amp_normalizer.normalize_torch(policy_next_state, self.device)
@@ -129,7 +130,7 @@ class AMPPPO(PPO):
             expert_loss = torch.nn.functional.mse_loss(expert_d, torch.ones_like(expert_d))
             policy_loss = torch.nn.functional.mse_loss(policy_d, -torch.ones_like(policy_d))
             grad_pen = (
-                self.discriminator.compute_grad_pen(raw_expert_state, raw_expert_next_state)
+                self.discriminator.compute_grad_pen(expert_state.detach(), expert_next_state.detach())
                 if self.grad_penalty_coef > 0.0
                 else torch.zeros((), device=self.device)
             )
@@ -152,6 +153,8 @@ class AMPPPO(PPO):
             mean_surrogate_loss += float(surrogate_loss.detach().cpu())
             mean_entropy += float(entropy.mean().detach().cpu())
             mean_amp_loss += float(amp_loss.detach().cpu())
+            mean_policy_loss += float(policy_loss.detach().cpu())
+            mean_expert_loss += float(expert_loss.detach().cpu())
             mean_grad_pen += float(grad_pen.detach().cpu())
             mean_policy_pred += float(policy_d.mean().detach().cpu())
             mean_expert_pred += float(expert_d.mean().detach().cpu())
@@ -162,9 +165,12 @@ class AMPPPO(PPO):
             "surrogate": mean_surrogate_loss / num_updates,
             "entropy": mean_entropy / num_updates,
             "amp": mean_amp_loss / num_updates,
+            "amp_policy": mean_policy_loss / num_updates,
+            "amp_expert": mean_expert_loss / num_updates,
             "amp_grad_pen": mean_grad_pen / num_updates,
             "amp_policy_pred": mean_policy_pred / num_updates,
             "amp_expert_pred": mean_expert_pred / num_updates,
+            "amp_pred_gap": (mean_expert_pred - mean_policy_pred) / num_updates,
         }
         if self._last_amp_reward is not None:
             loss_dict["amp_reward"] = float(self._last_amp_reward.mean().detach().cpu())

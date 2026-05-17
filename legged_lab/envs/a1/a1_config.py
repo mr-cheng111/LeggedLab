@@ -25,7 +25,7 @@ class A1AMPRewardCfg(RewardCfg):
     """
 
     track_lin_vel_xy_exp = RewTerm(func=mdp.track_lin_vel_xy_yaw_frame_exp, weight=1.5, params={"std": 0.5})
-    track_ang_vel_z_exp = RewTerm(func=mdp.track_ang_vel_z_world_exp, weight=0.5, params={"std": 0.5})
+    track_ang_vel_z_exp = RewTerm(func=mdp.track_ang_vel_z_world_exp, weight=1.0, params={"std": 0.5})
     lin_vel_z_l2 = RewTerm(func=mdp.lin_vel_z_l2, weight=-1.0)
     ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.05)
     energy = RewTerm(func=mdp.energy, weight=-1.0e-4)
@@ -71,9 +71,9 @@ class A1AMPFlatEnvCfg(BaseEnvCfg):
         self.commands.heading_command = False
         self.commands.rel_standing_envs = 0.0
         self.commands.rel_heading_envs = 0.0
-        self.commands.ranges.lin_vel_x = (0.0, 1.0)
-        self.commands.ranges.lin_vel_y = (-0.3, 0.3)
-        self.commands.ranges.ang_vel_z = (-1.0, 1.0)
+        self.commands.ranges.lin_vel_x = (-0.6, 1.0)
+        self.commands.ranges.lin_vel_y = (-0.5, 0.5)
+        self.commands.ranges.ang_vel_z = (-1.57, 1.57)
         self.noise.add_noise = False
         self.domain_rand.events.physics_material = None
         self.domain_rand.events.add_base_mass = None
@@ -104,16 +104,18 @@ class A1AMPFlatAgentCfg(BaseAgentCfg):
         "motion_files": [],
         "canonical_obs_dim": 30,
         "retarget_adapter": {
-            "class_path": "legged_lab.amp.retarget:NoOpRetargetAdapter",
+            "class_path": "legged_lab.amp.retarget:A1CanonicalRetargetAdapter",
             "profile": "a1_canonical_v1",
+            "target_joint_order": "env",
         },
-        "reward_coef": 0.01,
+        "reward_coef": 0.2,
         "task_reward_weight": 1.0,
-        "amp_reward_weight": 1.0,
+        "amp_reward_weight": 0.2,
         "discriminator_hidden_dims": [256, 128],
         "replay_buffer_size": 10000,
         "num_preload_transitions": 4096,
-        "grad_penalty_coef": 0.0,
+        "preload_normalizer": True,
+        "grad_penalty_coef": 0.1,
     }
 
     def __post_init__(self):
