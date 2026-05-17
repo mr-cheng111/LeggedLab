@@ -22,6 +22,8 @@ inherit from ``isaaclab.terrains.terrains_cfg.TerrainConfig`` and define the fol
 import isaaclab.terrains as terrain_gen
 from isaaclab.terrains.terrain_generator_cfg import TerrainGeneratorCfg
 
+from .wmp_terrain import WMPHeightFieldTerrainGenerator
+
 
 def make_single_terrain_cfg(name: str, sub_terrain, difficulty: float = 0.7) -> TerrainGeneratorCfg:
     """构造单一场景地形。
@@ -31,10 +33,11 @@ def make_single_terrain_cfg(name: str, sub_terrain, difficulty: float = 0.7) -> 
     这里固定 difficulty，便于预览时每个 tile 呈现一致难度。
     """
     return TerrainGeneratorCfg(
+        class_type=WMPHeightFieldTerrainGenerator,
         curriculum=False,
         difficulty_range=(difficulty, difficulty),
         size=(8.0, 8.0),
-        border_width=20.0,
+        border_width=25.0,
         num_rows=1,
         num_cols=1,
         horizontal_scale=0.1,
@@ -123,66 +126,63 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
     },
 )
 
+
+WMP_MIXED_TERRAINS_CFG = TerrainGeneratorCfg(
+    class_type=WMPHeightFieldTerrainGenerator,
+    curriculum=True,
+    difficulty_range=(0.0, 1.0),
+    size=(8.0, 8.0),
+    border_width=25.0,
+    num_rows=10,
+    num_cols=20,
+    horizontal_scale=0.1,
+    vertical_scale=0.005,
+    slope_threshold=0.75,
+    use_cache=False,
+    sub_terrains={
+        # 对齐 WMP A1 AMP:
+        # [wave, rough slope, stairs up, stairs down, discrete, gap, pit/climb, tilt, crawl, rough_flat]
+        "wmp_wave": terrain_gen.MeshPlaneTerrainCfg(proportion=0.0),
+        "wmp_slope": terrain_gen.MeshPlaneTerrainCfg(proportion=0.05),
+        "wmp_stair_up": terrain_gen.MeshPlaneTerrainCfg(proportion=0.15),
+        "wmp_stair_down": terrain_gen.MeshPlaneTerrainCfg(proportion=0.15),
+        "wmp_discrete": terrain_gen.MeshPlaneTerrainCfg(proportion=0.0),
+        "wmp_gap": terrain_gen.MeshPlaneTerrainCfg(proportion=0.25),
+        "wmp_climb": terrain_gen.MeshPlaneTerrainCfg(proportion=0.25),
+        "wmp_tilt": terrain_gen.MeshPlaneTerrainCfg(proportion=0.05),
+        "wmp_crawl": terrain_gen.MeshPlaneTerrainCfg(proportion=0.05),
+        "wmp_rough_flat": terrain_gen.MeshPlaneTerrainCfg(proportion=0.05),
+    },
+)
+
 WMP_SLOPE_TERRAINS_CFG = make_single_terrain_cfg(
     "wmp_slope",
-    terrain_gen.HfPyramidSlopedTerrainCfg(
-        proportion=1.0,
-        slope_range=(0.08, 0.45),
-        platform_width=2.0,
-        border_width=0.25,
-    ),
+    terrain_gen.MeshPlaneTerrainCfg(proportion=1.0),
 )
 
 WMP_STAIR_TERRAINS_CFG = make_single_terrain_cfg(
     "wmp_stair",
-    terrain_gen.MeshInvertedPyramidStairsTerrainCfg(
-        proportion=1.0,
-        step_height_range=(0.05, 0.23),
-        step_width=0.30,
-        platform_width=3.0,
-        border_width=1.0,
-        holes=False,
-    ),
+    terrain_gen.MeshPlaneTerrainCfg(proportion=1.0),
 )
 
 WMP_GAP_TERRAINS_CFG = make_single_terrain_cfg(
     "wmp_gap",
-    terrain_gen.MeshGapTerrainCfg(
-        proportion=1.0,
-        gap_width_range=(0.15, 0.60),
-        platform_width=2.0,
-    ),
+    terrain_gen.MeshPlaneTerrainCfg(proportion=1.0),
 )
 
 WMP_CLIMB_TERRAINS_CFG = make_single_terrain_cfg(
     "wmp_climb",
-    terrain_gen.MeshBoxTerrainCfg(
-        proportion=1.0,
-        box_height_range=(0.08, 0.35),
-        platform_width=2.0,
-        double_box=True,
-    ),
+    terrain_gen.MeshPlaneTerrainCfg(proportion=1.0),
 )
 
 WMP_TILT_TERRAINS_CFG = make_single_terrain_cfg(
     "wmp_tilt",
-    terrain_gen.HfPyramidSlopedTerrainCfg(
-        proportion=1.0,
-        slope_range=(0.12, 0.55),
-        platform_width=1.5,
-        border_width=0.25,
-    ),
+    terrain_gen.MeshPlaneTerrainCfg(proportion=1.0),
 )
 
 WMP_CRAWL_TERRAINS_CFG = make_single_terrain_cfg(
     "wmp_crawl",
-    terrain_gen.MeshFloatingRingTerrainCfg(
-        proportion=1.0,
-        ring_width_range=(0.25, 0.75),
-        ring_height_range=(0.45, 0.85),
-        ring_thickness=0.12,
-        platform_width=1.8,
-    ),
+    terrain_gen.MeshPlaneTerrainCfg(proportion=1.0),
     difficulty=0.4,
 )
 

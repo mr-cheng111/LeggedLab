@@ -118,6 +118,12 @@ class RSSM(nn.Module):
         prior = {k: swap(v) for k, v in prior.items()}
         return post, prior
 
+    def imagine_with_action(self, action, state):
+        swap = lambda x: x.permute([1, 0] + list(range(2, len(x.shape))))
+        action = swap(action)
+        prior = tools.static_scan(self.img_step, [action], state)[0]
+        return {k: swap(v) for k, v in prior.items()}
+
     def get_feat(self, state):
         stoch = state["stoch"]
         if self._discrete:
@@ -132,6 +138,23 @@ class RSSM(nn.Module):
             dist = tools.OneHotDist(state["logit"], unimix_ratio=self._unimix_ratio)
             return torchd.independent.Independent(dist, 1)
         return tools.ContDist(torchd.independent.Independent(torchd.normal.Normal(state["mean"], state["std"]), 1))
+
+    def kl_loss(self, post, prior, free, dyn_scale, rep_scale):
+        """DreamerV3/WMP KL 损失。
+
+        公式来源为 WMP dreamer/networks.py:
+        L = dyn_scale * max(KL(sg(post) || prior), free)
+          + rep_scale * max(KL(post || sg(prior)), free)
+        其中 sg 表示 stop-gradient。
+        """
+        dist = lambda x: self.get_dist(x)
+        sg = lambda x: {k: v.detach() for k, v in x.items()}
+        rep_loss = value = torchd.kl.kl_divergence(dist(post), dist(sg(prior)))
+        dyn_loss = torchd.kl.kl_divergence(dist(sg(post)), dist(prior))
+        rep_loss = torch.clip(rep_loss, min=free)
+        dyn_loss = torch.clip(dyn_loss, min=free)
+        loss = dyn_scale * dyn_loss + rep_scale * rep_loss
+        return loss, value, dyn_loss, rep_loss
 
     def obs_step(self, prev_state, prev_action, embed, is_first, sample=True):
         if prev_state is None or torch.sum(is_first) == len(is_first):

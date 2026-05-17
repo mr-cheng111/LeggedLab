@@ -62,6 +62,20 @@ class WMPWorldModelConfig:
     reward_head: dict = field(
         default_factory=lambda: {"layers": 2, "dist": "symlog_disc", "loss_scale": 0.0, "outscale": 0.0}
     )
+    grad_heads: tuple[str, ...] = ("decoder", "reward")
+    dyn_scale: float = 0.5
+    rep_scale: float = 0.1
+    kl_free: float = 1.0
+    weight_decay: float = 0.0
+    train_steps_per_iter: int = 10
+    train_start_steps: int = 10000
+    batch_size: int = 16
+    batch_length: int = 64
+    model_lr: float = 1.0e-4
+    opt_eps: float = 1.0e-8
+    grad_clip: float = 1000.0
+    opt: str = "adam"
+    feature_type: str = "deter"
 
 
 def make_default_wmp_config(device: str = "cuda:0", num_actions: int = 12) -> WMPWorldModelConfig:
@@ -69,4 +83,3 @@ def make_default_wmp_config(device: str = "cuda:0", num_actions: int = 12) -> WM
     cfg.device = device
     cfg.num_actions = num_actions
     return cfg
-

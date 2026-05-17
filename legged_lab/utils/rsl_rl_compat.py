@@ -56,6 +56,9 @@ def adapt_legacy_cfg_for_rsl_rl_v5(cfg_dict: dict) -> dict:
         out["obs_groups"] = obs_groups
         return out
 
+    if out.get("actor") and out.get("critic"):
+        return out
+
     policy = out.get("policy")
     if not isinstance(policy, dict):
         return out
@@ -118,4 +121,3 @@ def adapt_legacy_cfg_for_rsl_rl_v5(cfg_dict: dict) -> dict:
     out["obs_groups"] = obs_groups
 
     return out
-

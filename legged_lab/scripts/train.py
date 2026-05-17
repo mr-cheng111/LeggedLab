@@ -24,6 +24,13 @@ parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
+parser.add_argument(
+    "--runner",
+    type=str,
+    default="default",
+    choices=["default", "wmp_amp", "amp_ppo"],
+    help="Training runner.",
+)
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -35,11 +42,13 @@ args_cli, hydra_args = parser.parse_known_args()
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 import os
+import gc
 from datetime import datetime
 
 import torch
 from isaaclab.utils.io import dump_yaml
 from isaaclab_tasks.utils import get_checkpoint_path
+from rsl_rl.utils import resolve_callable
 
 from legged_lab.envs import *  # noqa:F401, F403
 from legged_lab.utils.cli_args import update_rsl_rl_cfg
@@ -69,86 +78,104 @@ def setup_wandb_env(logger_name: str):
 
 def train():
     runner: OnPolicyRunner
+    env = None
 
-    env_class_name = args_cli.task
-    env_cfg, agent_cfg = task_registry.get_cfgs(env_class_name)
-    env_class = task_registry.get_task_class(env_class_name)
+    try:
+        env_class_name = args_cli.task
+        env_cfg, agent_cfg = task_registry.get_cfgs(env_class_name)
+        env_class = task_registry.get_task_class(env_class_name)
 
-    if args_cli.num_envs is not None:
-        env_cfg.scene.num_envs = args_cli.num_envs
+        if args_cli.num_envs is not None:
+            env_cfg.scene.num_envs = args_cli.num_envs
+        if args_cli.runner == "wmp_amp" and not getattr(args_cli, "enable_cameras", False):
+            print("[WARN] WMP-AMP runner without --enable_cameras: using zero-depth fallback for dry smoke only.")
+            env_cfg.scene.gemini2_camera.enable = False
+            env_cfg.scene.gemini2_camera.enable_depth = False
+            env_cfg.scene.gemini2_camera.enable_rgb = False
+            env_cfg.scene.gemini2_camera.allow_missing_depth_fallback = True
 
-    agent_cfg = update_rsl_rl_cfg(agent_cfg, args_cli)
-    env_cfg.scene.seed = agent_cfg.seed
-    print(f"[INFO] Effective logger: {agent_cfg.logger}")
+        agent_cfg = update_rsl_rl_cfg(agent_cfg, args_cli)
+        env_cfg.scene.seed = agent_cfg.seed
+        print(f"[INFO] Effective logger: {agent_cfg.logger}")
 
-    if args_cli.distributed:
-        env_cfg.sim.device = f"cuda:{app_launcher.local_rank}"
-        agent_cfg.device = f"cuda:{app_launcher.local_rank}"
+        if args_cli.distributed:
+            env_cfg.sim.device = f"cuda:{app_launcher.local_rank}"
+            agent_cfg.device = f"cuda:{app_launcher.local_rank}"
 
-        # set seed to have diversity in different threads
-        seed = agent_cfg.seed + app_launcher.local_rank
-        env_cfg.scene.seed = seed
-        agent_cfg.seed = seed
+            # set seed to have diversity in different threads
+            seed = agent_cfg.seed + app_launcher.local_rank
+            env_cfg.scene.seed = seed
+            agent_cfg.seed = seed
 
-    # 在构造 runner 前配置 wandb 环境变量
-    setup_wandb_env(agent_cfg.logger)
+        # 在构造 runner 前配置 wandb 环境变量
+        setup_wandb_env(agent_cfg.logger)
 
-    env = env_class(env_cfg, args_cli.headless)
+        env = env_class(env_cfg, args_cli.headless)
 
-    log_root_path = os.path.join("logs", agent_cfg.experiment_name)
-    log_root_path = os.path.abspath(log_root_path)
-    print(f"[INFO] Logging experiment in directory: {log_root_path}")
+        log_root_path = os.path.join("logs", agent_cfg.experiment_name)
+        log_root_path = os.path.abspath(log_root_path)
+        print(f"[INFO] Logging experiment in directory: {log_root_path}")
 
-    log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    if agent_cfg.run_name:
-        log_dir += f"_{agent_cfg.run_name}"
-    log_dir = os.path.join(log_root_path, log_dir)
-    cfg_dict = agent_cfg.to_dict()
-    if not cfg_dict.get("obs_groups"):
-        # 旧代码路径默认键名为 policy/critic，这里保留默认语义。
-        cfg_dict["obs_groups"] = {
-            "policy": ["policy"],
-            "critic": ["critic"],
-        }
-    # 兼容 rsl_rl 5.x：自动把旧配置映射到 actor/critic。
-    if is_rsl_rl_v5_plus():
-        print("[INFO] Detected rsl_rl v5+, applying legacy cfg compatibility mapping.")
-        cfg_dict = adapt_legacy_cfg_for_rsl_rl_v5(cfg_dict)
+        log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        if agent_cfg.run_name:
+            log_dir += f"_{agent_cfg.run_name}"
+        log_dir = os.path.join(log_root_path, log_dir)
+        cfg_dict = agent_cfg.to_dict()
+        if not cfg_dict.get("obs_groups"):
+            # 旧代码路径默认键名为 policy/critic，这里保留默认语义。
+            cfg_dict["obs_groups"] = {
+                "policy": ["policy"],
+                "critic": ["critic"],
+            }
+        # 兼容 rsl_rl 5.x：自动把旧配置映射到 actor/critic。
+        if is_rsl_rl_v5_plus():
+            print("[INFO] Detected rsl_rl v5+, applying legacy cfg compatibility mapping.")
+            cfg_dict = adapt_legacy_cfg_for_rsl_rl_v5(cfg_dict)
 
-    runner = OnPolicyRunner(
-        env,
-        cfg_dict,
-        log_dir=log_dir,
-        device=agent_cfg.device,
-    )
+        runner_cls = OnPolicyRunner
+        if args_cli.runner == "wmp_amp":
+            runner_cls = resolve_callable(getattr(agent_cfg, "runner_class_name", "legged_lab.runners.wmp_amp_runner:WMPAMPRunner"))
+        elif args_cli.runner == "amp_ppo":
+            runner_cls = resolve_callable(getattr(agent_cfg, "runner_class_name", "legged_lab.runners.amp_ppo_runner:AMPPPORunner"))
+        runner = runner_cls(env, cfg_dict, log_dir=log_dir, device=agent_cfg.device)
 
-    remaining_iterations = agent_cfg.max_iterations
+        remaining_iterations = agent_cfg.max_iterations
 
-    if agent_cfg.resume:
-        # get path to previous checkpoint
-        resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
-        print(f"[INFO]: Loading model checkpoint from: {resume_path}")
-        # load previously trained model
-        runner.load(resume_path)
+        if agent_cfg.resume:
+            # get path to previous checkpoint
+            resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+            print(f"[INFO]: Loading model checkpoint from: {resume_path}")
+            # load previously trained model
+            runner.load(resume_path)
 
-        # 兼容 rsl_rl 的语义: learn(num_learning_iterations) 在 resume 时表示“追加轮次”
-        # 这里将其转换为“训练到 max_iterations 为止”
-        completed_iterations = runner.current_learning_iteration + 1
-        remaining_iterations = max(agent_cfg.max_iterations - completed_iterations, 0)
-        print(
-            f"[INFO] Resume iteration: {runner.current_learning_iteration}, "
-            f"target max_iterations: {agent_cfg.max_iterations}, "
-            f"remaining_iterations: {remaining_iterations}"
-        )
+            # 兼容 rsl_rl 的语义: learn(num_learning_iterations) 在 resume 时表示“追加轮次”
+            # 这里将其转换为“训练到 max_iterations 为止”
+            completed_iterations = runner.current_learning_iteration + 1
+            remaining_iterations = max(agent_cfg.max_iterations - completed_iterations, 0)
+            print(
+                f"[INFO] Resume iteration: {runner.current_learning_iteration}, "
+                f"target max_iterations: {agent_cfg.max_iterations}, "
+                f"remaining_iterations: {remaining_iterations}"
+            )
 
-    dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
-    dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+        dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
+        dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
 
-    if remaining_iterations <= 0:
-        print("[INFO] Max iterations reached. Skip training.")
-        return
+        if remaining_iterations <= 0:
+            print("[INFO] Max iterations reached. Skip training.")
+            return
 
-    runner.learn(num_learning_iterations=remaining_iterations, init_at_random_ep_len=True)
+        runner.learn(num_learning_iterations=remaining_iterations, init_at_random_ep_len=True)
+    finally:
+        if env is not None and hasattr(env, "close"):
+            try:
+                print("[INFO] Closing training environment before shutting down IsaacSim.")
+                env.close()
+            except Exception as exc:
+                print(f"[WARN] Failed to close training environment cleanly: {exc}")
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":

@@ -235,3 +235,43 @@ train.py -> get_cfgs -> BaseEnv()
             PPO update
             log/save
 ```
+
+## WMP + AMP-PPO
+
+当前已加入第一版 `b2_rgbd_wmp_amp_flat`：在 rsl_rl 5 PPO 基础上拼接 WMP RSSM feature，并用 WMP AMP 判别器替换 rollout reward。该版本用于打通训练链路，不承诺复现论文最终性能。
+
+- WMP 输入：Gemini2 `distance_to_image_plane -> clamp/normalize -> 1x64x64 -> NHWC image`，policy feature 默认使用 RSSM `deter=512`。
+- AMP 数据：默认使用 `datasets/wmp_mocap_motions/*.txt`，来源于 ByteDance WMP 的四足 mocap；B2 joint/foot 顺序会在启动时打印，必要时需要进一步做显式 remap。
+- RGB：第一版不使用 RGB，相机任务只启用 depth。
+- DepthPredictor：第一版暂不接入。
+
+快速 dry smoke（不启真实相机，使用零 depth fallback，只用于检查 PPO/AMP/WMP Python 链路）：
+
+```bash
+env CONDA_PREFIX=/home/tower/miniconda/envs/isaaclab \
+/home/tower/Bags/IsaacLab/isaaclab.sh -p legged_lab/scripts/train.py \
+  --task=b2_rgbd_wmp_amp_flat \
+  --num_envs=2 \
+  --headless \
+  --runner=wmp_amp \
+  --max_iterations=1 \
+  --num_steps_per_env=2 \
+  --num_mini_batches=1 \
+  --logger=tensorboard
+```
+
+真实 depth 训练需要开启 camera：
+
+```bash
+env CONDA_PREFIX=/home/tower/miniconda/envs/isaaclab \
+/home/tower/Bags/IsaacLab/isaaclab.sh -p legged_lab/scripts/train.py \
+  --task=b2_rgbd_wmp_amp_flat \
+  --num_envs=64 \
+  --headless \
+  --enable_cameras \
+  --runner=wmp_amp \
+  --max_iterations=10000 \
+  --logger=wandb \
+  --log_project_name=b2_rgbd_wmp_amp \
+  --run_name=wmp_amp_depth_only_v1
+```

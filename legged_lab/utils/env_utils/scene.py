@@ -19,6 +19,7 @@ from isaaclab.terrains.terrain_importer_cfg import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 
+from legged_lab.terrains.wmp_terrain import WMPTerrainImporter
 from legged_lab.terrains.ray_caster_cfg import RayCasterCfg
 
 if TYPE_CHECKING:
@@ -33,6 +34,7 @@ class SceneCfg(InteractiveSceneCfg):
         super().__init__(num_envs=config.num_envs, env_spacing=config.env_spacing)
 
         self.terrain = TerrainImporterCfg(
+            class_type=WMPTerrainImporter,
             prim_path="/World/ground",
             terrain_type=config.terrain_type,
             terrain_generator=config.terrain_generator,
@@ -89,20 +91,22 @@ class SceneCfg(InteractiveSceneCfg):
         if config.gemini2_camera.enable:
             rgb_prim_path = "{ENV_REGEX_NS}/Robot/" + config.gemini2_camera.rgb_camera_path.strip("/")
             depth_prim_path = "{ENV_REGEX_NS}/Robot/" + config.gemini2_camera.depth_camera_path.strip("/")
-            self.gemini2_rgb_camera = TiledCameraCfg(
-                prim_path=rgb_prim_path,
-                update_period=config.gemini2_camera.update_period,
-                width=config.gemini2_camera.width,
-                height=config.gemini2_camera.height,
-                data_types=["rgb"],
-                spawn=None,
-            )
-            self.gemini2_depth_camera = TiledCameraCfg(
-                prim_path=depth_prim_path,
-                update_period=config.gemini2_camera.update_period,
-                width=config.gemini2_camera.width,
-                height=config.gemini2_camera.height,
-                data_types=["distance_to_image_plane"],
-                depth_clipping_behavior=config.gemini2_camera.depth_clipping_behavior,
-                spawn=None,
-            )
+            if config.gemini2_camera.enable_rgb:
+                self.gemini2_rgb_camera = TiledCameraCfg(
+                    prim_path=rgb_prim_path,
+                    update_period=config.gemini2_camera.update_period,
+                    width=config.gemini2_camera.width,
+                    height=config.gemini2_camera.height,
+                    data_types=["rgb"],
+                    spawn=None,
+                )
+            if config.gemini2_camera.enable_depth:
+                self.gemini2_depth_camera = TiledCameraCfg(
+                    prim_path=depth_prim_path,
+                    update_period=config.gemini2_camera.update_period,
+                    width=config.gemini2_camera.width,
+                    height=config.gemini2_camera.height,
+                    data_types=["distance_to_image_plane"],
+                    depth_clipping_behavior=config.gemini2_camera.depth_clipping_behavior,
+                    spawn=None,
+                )

@@ -44,6 +44,8 @@ class Gemini2CameraCfg:
     """
 
     enable: bool = False
+    enable_rgb: bool = True
+    enable_depth: bool = True
     rgb_camera_path: str = "base_link/RGBD_link/Gemini2/Orbbec_Gemini2/camera_rgb/camera_rgb/Stream_rgb"
     depth_camera_path: str = "base_link/RGBD_link/Gemini2/Orbbec_Gemini2/camera_ir_left/camera_left/Stream_depth"
     width: int = 320
@@ -52,6 +54,7 @@ class Gemini2CameraCfg:
     depth_near: float = 0.15
     depth_far: float = 10.0
     depth_clipping_behavior: str = "none"
+    allow_missing_depth_fallback: bool = False
 
 
 @configclass
@@ -74,6 +77,8 @@ class RobotCfg:
     action_scale: float = 0.25
     terminate_contacts_body_names: list = []
     feet_body_names: list = []
+    terminate_on_flight: bool = False
+    terminate_on_flight_threshold: float = 1.0
 
 
 @configclass

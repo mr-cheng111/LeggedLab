@@ -26,7 +26,12 @@ parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
+parser.add_argument("--runner", type=str, default="default", choices=["default", "wmp_amp"], help="Runner/checkpoint type.")
 parser.add_argument("--show_depth_points", action="store_true", help="Visualize Gemini2 depth hits as red debug points.")
+parser.add_argument("--enable_play_push", action="store_true", help="Keep interval push disturbances enabled during play.")
+parser.add_argument(
+    "--hide_command", action="store_true", help="Hide command/current velocity debug visualization during play."
+)
 parser.add_argument("--depth_point_stride", type=int, default=16, help="Pixel stride for depth hit point visualization.")
 parser.add_argument("--depth_point_max", type=int, default=300, help="Maximum depth hit points to draw.")
 parser.add_argument("--depth_point_size", type=float, default=5.0, help="Debug draw size of each red depth hit point.")
@@ -47,11 +52,16 @@ from isaaclab_rl.rsl_rl import export_policy_as_jit, export_policy_as_onnx
 from isaaclab.sensors import patterns
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab.utils.math import quat_apply
-from isaacsim.util.debug_draw import _debug_draw
+
+try:
+    from isaacsim.util.debug_draw import _debug_draw
+except ModuleNotFoundError:
+    from omni.isaac.debug_draw import _debug_draw
 
 from legged_lab.envs import *  # noqa:F401, F403
 from legged_lab.utils.cli_args import update_rsl_rl_cfg
 from legged_lab.utils.rsl_rl_compat import adapt_legacy_cfg_for_rsl_rl_v5, is_rsl_rl_v5_plus
+from legged_lab.world_models.wmp import depth_to_wmp_image
 
 
 def _depth_to_hit_points(
@@ -112,13 +122,21 @@ def play():
     env_cfg, agent_cfg = task_registry.get_cfgs(env_class_name)
 
     env_cfg.noise.add_noise = False
-    env_cfg.domain_rand.events.push_robot = None
+    if not args_cli.enable_play_push:
+        env_cfg.domain_rand.events.push_robot = None
     env_cfg.scene.max_episode_length_s = 40.0
     env_cfg.scene.num_envs = 50
     env_cfg.scene.env_spacing = 2.5
-    env_cfg.commands.ranges.lin_vel_x = (-0.6, 0.6)
-    env_cfg.commands.ranges.lin_vel_y = (0.0, 1.0)
-    env_cfg.commands.ranges.heading = (0.0, 0.0)
+    if "slow_walk" in env_class_name:
+        env_cfg.commands.ranges.lin_vel_x = (-0.2, 1.0)
+        env_cfg.commands.ranges.lin_vel_y = (1.0, 1.0)
+        env_cfg.commands.ranges.ang_vel_z = (-0.5, 0.5)
+        env_cfg.commands.ranges.heading = (0.0, 0.0)
+    elif "stand" not in env_class_name:
+        env_cfg.commands.ranges.lin_vel_x = (-0.6, 0.6)
+        env_cfg.commands.ranges.lin_vel_y = (0.0, 1.0)
+        env_cfg.commands.ranges.heading = (0.0, 0.0)
+    env_cfg.commands.debug_vis = not args_cli.hide_command
     env_cfg.scene.height_scanner.drift_range = (0.0, 0.0)
 
     # env_cfg.scene.terrain_generator = None
@@ -157,7 +175,12 @@ def play():
         print("[INFO] Detected rsl_rl v5+, applying legacy cfg compatibility mapping.")
         cfg_dict = adapt_legacy_cfg_for_rsl_rl_v5(cfg_dict)
 
-    runner = OnPolicyRunner(env, cfg_dict, log_dir=log_dir, device=agent_cfg.device)
+    if args_cli.runner == "wmp_amp":
+        from legged_lab.runners import WMPAMPRunner
+
+        runner = WMPAMPRunner(env, cfg_dict, log_dir=log_dir, device=agent_cfg.device)
+    else:
+        runner = OnPolicyRunner(env, cfg_dict, log_dir=log_dir, device=agent_cfg.device)
     if is_rsl_rl_v5_plus():
         # rsl_rl 5.x: load() 使用 load_cfg，不再支持 load_optimizer 参数。
         runner.load(
@@ -209,6 +232,9 @@ def play():
         keyboard = Keyboard(env)  # noqa:F841
 
     obs = env.get_observations()
+    wm_latent = None
+    wm_action = torch.zeros(env.num_envs, env.num_actions, device=getattr(runner, "wm_device", env.device))
+    wm_is_first = torch.ones(env.num_envs, device=getattr(runner, "wm_device", env.device))
     depth_camera = env.scene.sensors.get("gemini2_depth_camera") if args_cli.show_depth_points else None
     depth_draw = _debug_draw.acquire_debug_draw_interface() if args_cli.show_depth_points else None
     if depth_camera is not None:
@@ -219,8 +245,26 @@ def play():
     while simulation_app.is_running():
 
         with torch.inference_mode():
+            if args_cli.runner == "wmp_amp":
+                depth = env.get_depth_observations()
+                wm_obs = {
+                    "prop": env.get_wmp_proprioception().to(runner.wm_device),
+                    "image": depth_to_wmp_image(
+                        depth,
+                        near=env_cfg.scene.gemini2_camera.depth_near,
+                        far=env_cfg.scene.gemini2_camera.depth_far,
+                    ).to(runner.wm_device),
+                    "is_first": wm_is_first,
+                }
+                wm_embed = runner.world_model.encoder(wm_obs)
+                wm_latent, _ = runner.world_model.dynamics.obs_step(wm_latent, wm_action, wm_embed, wm_is_first)
+                wm_feature = runner._wm_feature(wm_latent).to(env.device)
+                obs["wmp"] = wm_feature
             actions = policy(obs)
             obs, _, _, _ = env.step(actions)
+            if args_cli.runner == "wmp_amp":
+                wm_action = actions.to(runner.wm_device)
+                wm_is_first = torch.zeros(env.num_envs, device=runner.wm_device)
             if depth_camera is not None and depth_draw is not None:
                 depth_points = _depth_to_hit_points(
                     depth_camera,

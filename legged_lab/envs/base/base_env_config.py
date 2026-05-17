@@ -213,6 +213,10 @@ class BaseAgentCfg(RslRlOnPolicyRunnerCfg):
     resume = False
     load_run = ".*"
     load_checkpoint = "model_.*.pt"
+    runner_class_name = "rsl_rl.runners:OnPolicyRunner"
+    wmp = {}
+    amp = {}
+    obs_groups = {}
 
     def __post_init__(self):
         pass

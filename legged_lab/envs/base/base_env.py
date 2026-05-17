@@ -60,8 +60,23 @@ class BaseEnv(VecEnv):
 
         self.robot: Articulation = self.scene["robot"]
         self.contact_sensor: ContactSensor = self.scene.sensors["contact_sensor"]
+        self.x_edge_mask = getattr(self.scene.terrain, "x_edge_mask", None)
+        self.wmp_edge_query_offset = getattr(self.scene.terrain, "wmp_edge_query_offset", (0.0, 0.0))
+        self.wmp_terrain_horizontal_scale = getattr(self.scene.terrain, "wmp_horizontal_scale", 1.0)
+        self.terrain_levels = getattr(self.scene.terrain, "terrain_levels", None)
+        self.terrain_types = getattr(self.scene.terrain, "terrain_types", None)
+        self.gap_start_col = getattr(self.scene.terrain, "gap_start_col", 0)
+        self.climb_end_col = getattr(self.scene.terrain, "climb_end_col", self.cfg.scene.terrain_generator.num_cols if self.cfg.scene.terrain_generator else 0)
+        if self.x_edge_mask is not None:
+            print(
+                "[INFO] WMP x_edge_mask enabled: "
+                f"shape={tuple(self.x_edge_mask.shape)}, true_count={int(self.x_edge_mask.sum().item())}, "
+                f"offset={self.wmp_edge_query_offset}, horizontal_scale={self.wmp_terrain_horizontal_scale}, "
+                f"gap/climb cols=[{self.gap_start_col}, {self.climb_end_col})"
+            )
         if self.cfg.scene.height_scanner.enable_height_scan:
             self.height_scanner: RayCaster = self.scene.sensors["height_scanner"]
+        self.gemini2_depth_camera = self.scene.sensors.get("gemini2_depth_camera")
 
         command_cfg = UniformVelocityCommandCfg(
             asset_name="robot",
@@ -83,6 +98,7 @@ class BaseEnv(VecEnv):
         if "startup" in self.event_manager.available_modes:
             self.event_manager.apply(mode="startup")
         self.reset(env_ids)
+        self._is_closed = False
 
     def init_buffers(self):
         self.extras = {}
@@ -118,6 +134,7 @@ class BaseEnv(VecEnv):
         self.termination_contact_cfg.resolve(self.scene)
         self.feet_cfg = SceneEntityCfg(name="contact_sensor", body_names=self.cfg.robot.feet_body_names)
         self.feet_cfg.resolve(self.scene)
+        self._amp_order_logged = False
 
         self.obs_scales = self.cfg.normalization.obs_scales
         self.add_noise = self.cfg.noise.add_noise
@@ -210,6 +227,10 @@ class BaseEnv(VecEnv):
         self.actor_obs_buffer.reset(env_ids)
         self.critic_obs_buffer.reset(env_ids)
         self.action_buffer.reset(env_ids)
+        if hasattr(self, "last_push_step_buf"):
+            self.last_push_step_buf[env_ids] = -1
+        if hasattr(self, "push_recovered_buf"):
+            self.push_recovered_buf[env_ids] = True
         self.episode_length_buf[env_ids] = 0
 
         self.scene.write_data_to_sim()
@@ -240,13 +261,48 @@ class BaseEnv(VecEnv):
         self.reset_buf, self.time_out_buf = self.check_reset()
         reward_buf = self.reward_manager.compute(self.step_dt)
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
+        terminal_amp_states = self.get_amp_observations()[env_ids]
         self.reset(env_ids)
 
         actor_obs, critic_obs = self.compute_observations()
         obs = TensorDict({"policy": actor_obs, "critic": critic_obs}, batch_size=[self.num_envs])
         self.extras["observations"] = {"critic": critic_obs}
+        self.extras["reset_env_ids"] = env_ids
+        self.extras["terminal_amp_states"] = terminal_amp_states
 
         return obs, reward_buf, self.reset_buf, self.extras
+
+    def get_depth_observations(self):
+        if self.gemini2_depth_camera is None:
+            if self.cfg.scene.gemini2_camera.allow_missing_depth_fallback:
+                return torch.full(
+                    (self.num_envs, self.cfg.scene.gemini2_camera.height, self.cfg.scene.gemini2_camera.width, 1),
+                    self.cfg.scene.gemini2_camera.depth_far,
+                    device=self.device,
+                )
+            raise RuntimeError("Gemini2 depth camera is not enabled for this task.")
+        return self.gemini2_depth_camera.data.output["distance_to_image_plane"]
+
+    def get_wmp_proprioception(self):
+        actor_obs, _ = self.compute_current_observations()
+        return actor_obs
+
+    def get_amp_observations(self):
+        robot = self.robot
+        joint_pos = robot.data.joint_pos
+        joint_vel = robot.data.joint_vel
+        root_lin_vel = robot.data.root_lin_vel_b
+        root_ang_vel = robot.data.root_ang_vel_b
+        amp_obs = torch.cat([joint_pos, root_lin_vel, root_ang_vel, joint_vel], dim=-1)
+        if not self._amp_order_logged:
+            print(f"[INFO] AMP joint order: {self.robot.joint_names}")
+            print("[INFO] AMP obs layout: joint_pos(12) + base_lin_vel_b(3) + base_ang_vel_b(3) + joint_vel(12)")
+            print(f"[INFO] AMP obs shape: {tuple(amp_obs.shape)}, dim={amp_obs.shape[-1]} (WMP original expects 30)")
+            self._amp_order_logged = True
+        return amp_obs
+
+    def get_terminal_amp_states(self):
+        return self.get_amp_observations()
 
     def check_reset(self):
         net_contact_forces = self.contact_sensor.data.net_forces_w_history
@@ -262,6 +318,12 @@ class BaseEnv(VecEnv):
             > 1.0,
             dim=1,
         )
+        if self.cfg.robot.terminate_on_flight:
+            feet_contact = (
+                torch.max(torch.norm(net_contact_forces[:, :, self.feet_cfg.body_ids], dim=-1), dim=1)[0]
+                > self.cfg.robot.terminate_on_flight_threshold
+            )
+            reset_buf |= torch.sum(feet_contact, dim=-1) < 0.5
         time_out_buf = self.episode_length_buf >= self.max_episode_length
         reset_buf |= time_out_buf
         return reset_buf, time_out_buf
@@ -315,6 +377,36 @@ class BaseEnv(VecEnv):
         obs = TensorDict({"policy": actor_obs, "critic": critic_obs}, batch_size=[self.num_envs])
         self.extras["observations"] = {"critic": critic_obs}
         return obs
+
+    def close(self):
+        """显式释放 IsaacLab 场景、传感器回调和 SimulationContext。
+
+        训练脚本在关闭 Omniverse App 前调用该方法。这里先检查对象是否存在，
+        再按 sensor/scene -> sim callbacks -> sim instance 的顺序清理，避免
+        camera/syntheticdata 回调在 App 关闭阶段继续持有 USD stage。
+        """
+        if getattr(self, "_is_closed", False):
+            return
+        print("[INFO] Closing BaseEnv resources.")
+        if hasattr(self, "scene"):
+            sensors = getattr(self.scene, "sensors", {})
+            for name in ("gemini2_rgb_camera", "gemini2_depth_camera"):
+                if name in sensors:
+                    print(f"[INFO] Releasing sensor: {name}")
+            del self.scene
+        if hasattr(self, "sim"):
+            try:
+                self.sim.stop()
+            except Exception as exc:
+                print(f"[WARN] Failed to stop simulation: {exc}")
+            for method_name in ("clear_all_callbacks", "clear_instance"):
+                method = getattr(self.sim, method_name, None)
+                if callable(method):
+                    try:
+                        method()
+                    except Exception as exc:
+                        print(f"[WARN] Failed to call sim.{method_name}(): {exc}")
+        self._is_closed = True
 
     @staticmethod
     def seed(seed: int = -1) -> int:
