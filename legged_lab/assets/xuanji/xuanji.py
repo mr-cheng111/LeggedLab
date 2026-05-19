@@ -11,8 +11,7 @@ from legged_lab.assets import ISAAC_ASSET_DIR
 RB160W_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
         usd_path=(
-            f"{ISAAC_ASSET_DIR}/xuanji/rb160w/urdf/RB160W_isaaclab_actuated/"
-            "configuration/RB160W_isaaclab_actuated_box_collision.usda"
+            f"{ISAAC_ASSET_DIR}/xuanji/rb160w/usd/rb160w.usd"
         ),
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(

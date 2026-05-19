@@ -75,6 +75,7 @@ class RobotCfg:
     actor_obs_history_length: int = 10
     critic_obs_history_length: int = 10
     action_scale: float = 0.25
+    wheel_velocity_scale: float = 8.0
     terminate_contacts_body_names: list = []
     feet_body_names: list = []
     terminate_on_flight: bool = False

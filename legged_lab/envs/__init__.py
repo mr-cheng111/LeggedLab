@@ -49,6 +49,8 @@ from legged_lab.envs.b2.b2_config import (
     B2RoughAgentCfg,
     B2RoughEnvCfg,
 )
+from legged_lab.envs.rb160w.rb160w_config import RB160WFlatAgentCfg, RB160WFlatEnvCfg
+from legged_lab.envs.rb160w.rb160w_env import RB160WEnv
 from legged_lab.utils.task_registry import task_registry
 
 task_registry.register("a1_amp_flat", BaseEnv, A1AMPFlatEnvCfg(), A1AMPFlatAgentCfg())
@@ -72,3 +74,4 @@ task_registry.register(
     B2RGBDWMPAMPTerrainEnvCfg(),
     B2RGBDWMPAMPTerrainAgentCfg(),
 )
+task_registry.register("rb160w_flat", RB160WEnv, RB160WFlatEnvCfg(), RB160WFlatAgentCfg())
