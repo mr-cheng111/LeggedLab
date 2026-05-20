@@ -55,6 +55,24 @@ def track_lin_vel_xy_yaw_frame_exp(
     return torch.exp(-lin_vel_error / std**2)
 
 
+def track_lin_vel_x_yaw_frame_exp(
+    env: BaseEnv, std: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """只跟踪机体系 yaw frame 下的正向速度。
+
+    公式:
+        r = exp(-((v_x_cmd - v_x)^2) / std^2)
+    其中 v_x 先通过 yaw-only 四元数投影到机体朝向坐标系；该项不奖励/惩罚 y 方向速度，
+    y 方向由 `base_lin_vel_yz_l2` 单独惩罚，避免策略把横移当作目标跟踪。
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    vel_yaw = math_utils.quat_apply_inverse(
+        math_utils.yaw_quat(asset.data.root_quat_w), asset.data.root_lin_vel_w[:, :3]
+    )
+    lin_vel_error = torch.square(env.command_generator.command[:, 0] - vel_yaw[:, 0])
+    return torch.exp(-lin_vel_error / std**2)
+
+
 def track_ang_vel_z_world_exp(
     env: BaseEnv, std: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:
@@ -77,6 +95,17 @@ def lin_vel_xy_l2(env: BaseEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robo
     """
     asset: Articulation = env.scene[asset_cfg.name]
     return torch.sum(torch.square(asset.data.root_lin_vel_b[:, :2]), dim=1)
+
+
+def base_lin_vel_yz_l2(env: BaseEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    """非目标 base 线速度平方惩罚。
+
+    公式:
+        r = v_y^2 + v_z^2
+    x 方向是本任务的目标前进速度，不在这里惩罚；该项用于抑制横向漂移和上下窜动。
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    return torch.sum(torch.square(asset.data.root_lin_vel_b[:, 1:3]), dim=1)
 
 
 def base_height_l2(
@@ -134,6 +163,11 @@ def joint_acc_l2(env: BaseEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot
     return torch.sum(torch.square(asset.data.joint_acc[:, asset_cfg.joint_ids]), dim=1)
 
 
+def joint_vel_l2(env: BaseEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    asset: Articulation = env.scene[asset_cfg.name]
+    return torch.sum(torch.square(asset.data.joint_vel[:, asset_cfg.joint_ids]), dim=1)
+
+
 def action_rate_l2(env: BaseEnv) -> torch.Tensor:
     return torch.sum(
         torch.square(
@@ -151,6 +185,26 @@ def action_rate_l2_joint(env: BaseEnv, asset_cfg: SceneEntityCfg = SceneEntityCf
         ),
         dim=1,
     )
+
+
+def action_l2_joint(env: BaseEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    return torch.sum(torch.square(env.action_buffer._circular_buffer.buffer[:, -1, asset_cfg.joint_ids]), dim=1)
+
+
+def stand_still_joint_deviation_l1(
+    env: BaseEnv, command_threshold: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """零速度命令下的关节姿态偏差。
+
+    公式:
+        r = 1(||cmd_xy|| < threshold) * sum_i |q_i - q_i_default|
+    参考 B2W 的 stand_still 项，轮足机器人通常只对腿部姿态使用该项，轮子关节应从
+    asset_cfg 中排除，避免速度控制轮在零命令时被位置偏差惩罚。
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    joint_error = torch.abs(asset.data.joint_pos[:, asset_cfg.joint_ids] - asset.data.default_joint_pos[:, asset_cfg.joint_ids])
+    standing = torch.norm(env.command_generator.command[:, :2], dim=1) < command_threshold
+    return torch.sum(joint_error, dim=1) * standing.float()
 
 
 def undesired_contacts(env: BaseEnv, threshold: float, sensor_cfg: SceneEntityCfg) -> torch.Tensor:

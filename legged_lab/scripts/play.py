@@ -145,13 +145,19 @@ def play():
     env_cfg.scene.num_envs = 50
     env_cfg.scene.env_spacing = 2.5
     if "slow_walk" in env_class_name:
-        env_cfg.commands.ranges.lin_vel_x = (-0.2, 1.0)
-        env_cfg.commands.ranges.lin_vel_y = (1.0, 1.0)
-        env_cfg.commands.ranges.ang_vel_z = (-0.5, 0.5)
+        env_cfg.commands.ranges.lin_vel_x = (0.0, 1.0)
+        env_cfg.commands.ranges.lin_vel_y = (0.0, 0.0)
+        env_cfg.commands.ranges.ang_vel_z = (0.0, 0.0)
+        env_cfg.commands.ranges.heading = (0.0, 0.0)
+    elif "rb160w" in env_class_name:
+        env_cfg.commands.ranges.lin_vel_x = (0.2, 0.8)
+        env_cfg.commands.ranges.lin_vel_y = (0.0, 0.0)
+        env_cfg.commands.ranges.ang_vel_z = (0.0, 0.0)
         env_cfg.commands.ranges.heading = (0.0, 0.0)
     elif "stand" not in env_class_name:
-        env_cfg.commands.ranges.lin_vel_x = (-0.6, 0.6)
-        env_cfg.commands.ranges.lin_vel_y = (0.0, 1.0)
+        env_cfg.commands.ranges.lin_vel_x = (0, 0.0)
+        env_cfg.commands.ranges.lin_vel_y = (0.0, 0.0)
+        env_cfg.commands.ranges.ang_vel_z = (0.0, 0.0)
         env_cfg.commands.ranges.heading = (0.0, 0.0)
     env_cfg.commands.debug_vis = not args_cli.hide_command
     env_cfg.scene.height_scanner.drift_range = (0.0, 0.0)

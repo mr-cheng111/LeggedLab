@@ -12,58 +12,117 @@ from legged_lab.assets.xuanji import RB160W_CFG
 from legged_lab.envs.base.base_env_config import BaseAgentCfg, BaseEnvCfg, RewardCfg
 
 
+def _compute_rb160w_base_height() -> float:
+    """根据初始化关节角估算 wheel 接地时的 base_link 高度。
+
+    平面几何公式:
+        h = h_hip + L_thigh * cos(q_thigh) + L_calf * cos(q_thigh + q_calf) + r_wheel
+    其中 h_hip=0.0666 来自 hip joint 相对 base_link 的 z 偏移绝对值，
+    L_thigh=0.27 来自 thigh->calf 关节 z 偏移，L_calf=0.351 来自 calf->wheel 关节 z 偏移，
+    r_wheel 由 WHEEL STL 包围盒半径近似得到。该目标比 USD spawn 高度更贴近当前默认腿姿态。
+    """
+    q_thigh = RB160W_CFG.init_state.joint_pos[".*_thigh_joint"]
+    q_calf = RB160W_CFG.init_state.joint_pos[".*_calf_joint"]
+    hip_height = 0.0666
+    thigh_length = 0.27
+    calf_to_wheel = 0.351
+    wheel_radius = 0.098
+    return hip_height + thigh_length * math.cos(q_thigh) + calf_to_wheel * math.cos(q_thigh + q_calf) + wheel_radius
+
+
+RB160W_BASE_HEIGHT = _compute_rb160w_base_height()
+RB160W_LEG_JOINTS = [".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"]
+RB160W_HIP_JOINTS = [".*_hip_joint"]
+RB160W_WHEEL_JOINTS = [".*_WHEEL_joint"]
+RB160W_WHEEL_BODIES = ".*WHEEL.*"
+
+
 @configclass
 class RB160WRewardCfg(RewardCfg):
-    track_lin_vel_xy_exp = RewTerm(func=mdp.track_lin_vel_xy_yaw_frame_exp, weight=3.0, params={"std": 0.45})
-    track_ang_vel_z_exp = RewTerm(func=mdp.track_ang_vel_z_world_exp, weight=2.0, params={"std": 0.45})
-    lin_vel_z_l2 = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
-    ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.2)
+    track_lin_vel_xy_exp = None
+    track_lin_vel_x_exp = RewTerm(func=mdp.track_lin_vel_x_yaw_frame_exp, weight=3.0, params={"std": 0.45})
+    track_ang_vel_z_exp = None
+    base_lin_vel_yz_l2 = RewTerm(func=mdp.base_lin_vel_yz_l2, weight=-4.0)
+    lin_vel_z_l2 = None
+    ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-1.0)
+    ang_vel_z_l2 = RewTerm(func=mdp.ang_vel_z_l2, weight=-0.8)
     energy = RewTerm(func=mdp.energy, weight=-2.0e-5)
+    leg_dof_vel_l2 = RewTerm(
+        func=mdp.joint_vel_l2,
+        weight=-1.0e-5,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=RB160W_LEG_JOINTS)},
+    )
     dof_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-5.0e-7)
     action_rate_l2 = None
     leg_action_rate_l2 = RewTerm(
         func=mdp.action_rate_l2_joint,
         weight=-0.08,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"])},
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=RB160W_LEG_JOINTS)},
     )
     wheel_action_rate_l2 = RewTerm(
         func=mdp.action_rate_l2_joint,
         weight=-0.01,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_WHEEL_joint"])},
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=RB160W_WHEEL_JOINTS)},
     )
-    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-1.0)
-    base_height_l2 = RewTerm(func=mdp.base_height_l2, weight=-2.0, params={"target_height": 0.72})
+    hip_action_l2 = RewTerm(
+        func=mdp.action_l2_joint,
+        weight=-0.05,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=RB160W_HIP_JOINTS)},
+    )
+    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-4.0)
+    body_orientation_l2 = RewTerm(
+        func=mdp.body_orientation_l2,
+        weight=-2.0,
+        params={"asset_cfg": SceneEntityCfg("robot", body_names="base_link")},
+    )
+    base_height_l2 = RewTerm(func=mdp.base_height_l2, weight=-2.0, params={"target_height": RB160W_BASE_HEIGHT})
     termination_penalty = RewTerm(func=mdp.is_terminated, weight=-5.0)
     fly = RewTerm(
         func=mdp.fly,
         weight=-1.0,
-        params={"sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*WHEEL.*"), "threshold": 1.0},
+        params={"sensor_cfg": SceneEntityCfg("contact_sensor", body_names=RB160W_WHEEL_BODIES), "threshold": 1.0},
     )
     wheel_contact_count = RewTerm(
         func=mdp.feet_contact_count,
         weight=0.5,
-        params={"sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*WHEEL.*"), "threshold": 1.0},
+        params={"sensor_cfg": SceneEntityCfg("contact_sensor", body_names=RB160W_WHEEL_BODIES), "threshold": 1.0},
     )
     all_wheels_contact = RewTerm(
         func=mdp.all_feet_contact,
         weight=0.5,
-        params={"sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*WHEEL.*"), "threshold": 1.0},
+        params={"sensor_cfg": SceneEntityCfg("contact_sensor", body_names=RB160W_WHEEL_BODIES), "threshold": 1.0},
     )
     undesired_contacts = RewTerm(
         func=mdp.undesired_contacts,
-        weight=-2.0,
-        params={"sensor_cfg": SceneEntityCfg("contact_sensor", body_names="(?!.*WHEEL.*).*"), "threshold": 1.0},
+        weight=-0.5,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_sensor", body_names=["base_link", ".*_thigh", ".*_calf"]),
+            "threshold": 1.0,
+        },
+    )
+    wheel_stumble = RewTerm(
+        func=mdp.feet_stumble,
+        weight=-0.1,
+        params={"sensor_cfg": SceneEntityCfg("contact_sensor", body_names=RB160W_WHEEL_BODIES)},
     )
     wheel_slide = None
+    stand_still = RewTerm(
+        func=mdp.stand_still_joint_deviation_l1,
+        weight=-0.01,
+        params={
+            "command_threshold": 0.1,
+            "asset_cfg": SceneEntityCfg("robot", joint_names=RB160W_LEG_JOINTS),
+        },
+    )
     leg_deviation_l2 = RewTerm(
         func=mdp.joint_deviation_l2,
         weight=-0.2,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"])},
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=RB160W_LEG_JOINTS)},
     )
     dof_pos_limits = RewTerm(
         func=mdp.joint_pos_limits,
         weight=-1.0,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"])},
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=RB160W_LEG_JOINTS)},
     )
 
 
@@ -102,10 +161,10 @@ class RB160WFlatEnvCfg(BaseEnvCfg):
         self.commands.debug_vis = False
         self.commands.rel_standing_envs = 0.1
         self.commands.rel_heading_envs = 0.0
-        self.commands.ranges.lin_vel_x = (-0.6, 1.2)
-        self.commands.ranges.lin_vel_y = (-0.4, 0.4)
-        self.commands.ranges.ang_vel_z = (-1.0, 1.0)
-        self.commands.ranges.heading = (-math.pi, math.pi)
+        self.commands.ranges.lin_vel_x = (0.2, 1.2)
+        self.commands.ranges.lin_vel_y = (0.0, 0.0)
+        self.commands.ranges.ang_vel_z = (0.0, 0.0)
+        self.commands.ranges.heading = (0.0, 0.0)
 
         self.noise.add_noise = True
         self.domain_rand.events.physics_material.params["static_friction_range"] = (0.8, 1.6)

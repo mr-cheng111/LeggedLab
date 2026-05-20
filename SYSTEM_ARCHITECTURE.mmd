@@ -1,0 +1,43 @@
+flowchart TB
+    User[用户 / CLI] --> Train[legged_lab/scripts/train.py]
+    User --> Play[legged_lab/scripts/play.py]
+    User --> GUI[legged_lab/scripts/launcher_gui.py]
+
+    Train --> App[IsaacLab AppLauncher]
+    Play --> App
+    GUI --> Train
+    GUI --> Play
+
+    Train --> Registry[legged_lab/utils/task_registry.py]
+    Play --> Registry
+
+    Registry --> TaskCfg[EnvCfg + AgentCfg]
+    Registry --> EnvClass[EnvClass]
+
+    TaskCfg --> BaseCfg[envs/base/base_env_config.py]
+    BaseCfg --> SceneCfg[Scene / Sim / Robot / Terrain / Sensor 配置]
+    BaseCfg --> TrainCfg[RSL-RL Agent 配置]
+
+    EnvClass --> BaseEnv[envs/base/base_env.py<br/>BaseEnv]
+    EnvClass --> RBEnv[envs/rb160w/rb160w_env.py<br/>RB160WEnv]
+
+    SceneCfg --> Assets[legged_lab/assets<br/>USD / ArticulationCfg]
+    SceneCfg --> Terrains[legged_lab/terrains<br/>plane / rough / WMP terrain]
+    SceneCfg --> Sensors[IsaacLab Sensors<br/>Contact / RayCaster / Camera]
+
+    BaseEnv --> Managers[CommandGenerator<br/>RewardManager<br/>EventManager]
+    BaseEnv --> MDP[legged_lab/mdp/rewards.py]
+    BaseEnv --> Obs[TensorDict Observations<br/>policy / critic]
+
+    Obs --> DefaultRunner[rsl_rl OnPolicyRunner]
+    Obs --> WMPRunner[legged_lab/runners/wmp_amp_runner.py<br/>WMPAMPRunner]
+
+    DefaultRunner --> PPO[RSL-RL PPO]
+    WMPRunner --> WMP[legged_lab/world_models/wmp<br/>RSSM World Model]
+    WMPRunner --> AMP[legged_lab/amp<br/>Motion Loader / Discriminator / Replay]
+    WMPRunner --> WMPAMPAlgo[legged_lab/algorithms/wmp_amp_ppo.py]
+
+    PPO --> Logs[logs/<experiment_name><br/>checkpoints / params / exported policy]
+    WMPAMPAlgo --> Logs
+    Play --> Export[policy.pt / policy.onnx]
+    Export --> Logs

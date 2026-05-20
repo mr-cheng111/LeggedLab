@@ -175,7 +175,7 @@ class BaseAgentCfg(RslRlOnPolicyRunnerCfg):
     seed = 42
     device = "cuda:0"
     num_steps_per_env = 24
-    max_iterations = 50000
+    max_iterations = 20000
     empirical_normalization = False
     policy = RslRlPpoActorCriticCfg(
         class_name="ActorCritic",
