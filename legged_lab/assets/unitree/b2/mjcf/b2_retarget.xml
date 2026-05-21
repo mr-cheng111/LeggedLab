@@ -1,0 +1,86 @@
+<mujoco model="b2_retarget">
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.02" gravity="0 0 -9.81"/>
+
+  <default>
+    <joint damping="0" armature="0"/>
+    <geom contype="0" conaffinity="0" density="100"/>
+    <site size="0.014" rgba="0.1 0.4 0.95 1"/>
+  </default>
+
+  <worldbody>
+    <body name="base" pos="0 0 0.58">
+      <freejoint name="root"/>
+      <geom name="base_visual" type="box" size="0.27 0.115 0.075" rgba="0.1 0.1 0.12 1"/>
+      <site name="base_site" pos="0 0 0"/>
+
+      <body name="FR_hip" pos="0.3285 -0.102 0">
+        <joint name="FR_hip_joint" type="hinge" axis="1 0 0" range="-0.87 0.87"/>
+        <geom type="sphere" size="0.045" rgba="0.2 0.5 0.95 1"/>
+        <site name="FR_hip_site" pos="0 0 0"/>
+        <body name="FR_thigh" pos="0 -0.11973 0">
+          <joint name="FR_thigh_joint" type="hinge" axis="0 1 0" range="-0.94 4.69"/>
+          <geom type="capsule" fromto="0 0 0 0 0 -0.35" size="0.027" rgba="0.2 0.5 0.95 1"/>
+          <site name="FR_thigh_site" pos="0 0 0"/>
+          <body name="FR_calf" pos="0 0 -0.35">
+            <joint name="FR_calf_joint" type="hinge" axis="0 1 0" range="-2.82 -0.84"/>
+            <geom type="capsule" fromto="0 0 0 0 0 -0.35" size="0.020" rgba="0.2 0.5 0.95 1"/>
+            <site name="FR_calf_site" pos="0 0 0"/>
+            <site name="FR_foot_site" pos="0 0 -0.35"/>
+          </body>
+        </body>
+      </body>
+
+      <body name="FL_hip" pos="0.3285 0.102 0">
+        <joint name="FL_hip_joint" type="hinge" axis="1 0 0" range="-0.87 0.87"/>
+        <geom type="sphere" size="0.045" rgba="0.2 0.5 0.95 1"/>
+        <site name="FL_hip_site" pos="0 0 0"/>
+        <body name="FL_thigh" pos="0 0.11973 0">
+          <joint name="FL_thigh_joint" type="hinge" axis="0 1 0" range="-0.94 4.69"/>
+          <geom type="capsule" fromto="0 0 0 0 0 -0.35" size="0.027" rgba="0.2 0.5 0.95 1"/>
+          <site name="FL_thigh_site" pos="0 0 0"/>
+          <body name="FL_calf" pos="0 0 -0.35">
+            <joint name="FL_calf_joint" type="hinge" axis="0 1 0" range="-2.82 -0.84"/>
+            <geom type="capsule" fromto="0 0 0 0 0 -0.35" size="0.020" rgba="0.2 0.5 0.95 1"/>
+            <site name="FL_calf_site" pos="0 0 0"/>
+            <site name="FL_foot_site" pos="0 0 -0.35"/>
+          </body>
+        </body>
+      </body>
+
+      <body name="RR_hip" pos="-0.3285 -0.102 0">
+        <joint name="RR_hip_joint" type="hinge" axis="1 0 0" range="-0.87 0.87"/>
+        <geom type="sphere" size="0.045" rgba="0.2 0.5 0.95 1"/>
+        <site name="RR_hip_site" pos="0 0 0"/>
+        <body name="RR_thigh" pos="0 -0.11973 0">
+          <joint name="RR_thigh_joint" type="hinge" axis="0 1 0" range="-0.94 4.69"/>
+          <geom type="capsule" fromto="0 0 0 0 0 -0.35" size="0.027" rgba="0.2 0.5 0.95 1"/>
+          <site name="RR_thigh_site" pos="0 0 0"/>
+          <body name="RR_calf" pos="0 0 -0.35">
+            <joint name="RR_calf_joint" type="hinge" axis="0 1 0" range="-2.82 -0.84"/>
+            <geom type="capsule" fromto="0 0 0 0 0 -0.35" size="0.020" rgba="0.2 0.5 0.95 1"/>
+            <site name="RR_calf_site" pos="0 0 0"/>
+            <site name="RR_foot_site" pos="0 0 -0.35"/>
+          </body>
+        </body>
+      </body>
+
+      <body name="RL_hip" pos="-0.3285 0.102 0">
+        <joint name="RL_hip_joint" type="hinge" axis="1 0 0" range="-0.87 0.87"/>
+        <geom type="sphere" size="0.045" rgba="0.2 0.5 0.95 1"/>
+        <site name="RL_hip_site" pos="0 0 0"/>
+        <body name="RL_thigh" pos="0 0.11973 0">
+          <joint name="RL_thigh_joint" type="hinge" axis="0 1 0" range="-0.94 4.69"/>
+          <geom type="capsule" fromto="0 0 0 0 0 -0.35" size="0.027" rgba="0.2 0.5 0.95 1"/>
+          <site name="RL_thigh_site" pos="0 0 0"/>
+          <body name="RL_calf" pos="0 0 -0.35">
+            <joint name="RL_calf_joint" type="hinge" axis="0 1 0" range="-2.82 -0.84"/>
+            <geom type="capsule" fromto="0 0 0 0 0 -0.35" size="0.020" rgba="0.2 0.5 0.95 1"/>
+            <site name="RL_calf_site" pos="0 0 0"/>
+            <site name="RL_foot_site" pos="0 0 -0.35"/>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>

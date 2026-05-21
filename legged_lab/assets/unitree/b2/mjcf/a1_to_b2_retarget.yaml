@@ -1,0 +1,104 @@
+source:
+  xml: legged_lab/assets/unitree/a1/mjcf/a1_retarget.xml
+  root_freejoint: root
+  base_site: base_site
+  joints:
+    - FR_hip_joint
+    - FR_thigh_joint
+    - FR_calf_joint
+    - FL_hip_joint
+    - FL_thigh_joint
+    - FL_calf_joint
+    - RR_hip_joint
+    - RR_thigh_joint
+    - RR_calf_joint
+    - RL_hip_joint
+    - RL_thigh_joint
+    - RL_calf_joint
+  frames:
+    base: base_site
+    FR_hip: FR_hip_site
+    FR_thigh: FR_thigh_site
+    FR_calf: FR_calf_site
+    FR_foot: FR_foot_site
+    FL_hip: FL_hip_site
+    FL_thigh: FL_thigh_site
+    FL_calf: FL_calf_site
+    FL_foot: FL_foot_site
+    RR_hip: RR_hip_site
+    RR_thigh: RR_thigh_site
+    RR_calf: RR_calf_site
+    RR_foot: RR_foot_site
+    RL_hip: RL_hip_site
+    RL_thigh: RL_thigh_site
+    RL_calf: RL_calf_site
+    RL_foot: RL_foot_site
+
+target:
+  xml: legged_lab/assets/unitree/b2/mjcf/b2_retarget.xml
+  root_freejoint: root
+  base_site: base_site
+  joints:
+    - FR_hip_joint
+    - FR_thigh_joint
+    - FR_calf_joint
+    - FL_hip_joint
+    - FL_thigh_joint
+    - FL_calf_joint
+    - RR_hip_joint
+    - RR_thigh_joint
+    - RR_calf_joint
+    - RL_hip_joint
+    - RL_thigh_joint
+    - RL_calf_joint
+  frames:
+    base: base_site
+    FR_hip: FR_hip_site
+    FR_thigh: FR_thigh_site
+    FR_calf: FR_calf_site
+    FR_foot: FR_foot_site
+    FL_hip: FL_hip_site
+    FL_thigh: FL_thigh_site
+    FL_calf: FL_calf_site
+    FL_foot: FL_foot_site
+    RR_hip: RR_hip_site
+    RR_thigh: RR_thigh_site
+    RR_calf: RR_calf_site
+    RR_foot: RR_foot_site
+    RL_hip: RL_hip_site
+    RL_thigh: RL_thigh_site
+    RL_calf: RL_calf_site
+    RL_foot: RL_foot_site
+
+retarget:
+  root_height_offset: 0.16
+  root_xy_scale: 1.0
+  frame_position_scale: 1.0
+  frame_target_mode: morphology_scaled
+  posture_mode: neutral
+  max_ik_iters: 40
+  solver: mink
+  qp_solver: daqp
+  damping: 1.0e-5
+  posture_cost: 0.005
+  frame_pos_cost: 1.0
+  foot_pos_cost: 4.0
+  root_cost: 2.0
+  neutral_joint_pos:
+    FR_hip_joint: -0.1
+    FR_thigh_joint: 0.8
+    FR_calf_joint: -1.5
+    FL_hip_joint: 0.1
+    FL_thigh_joint: 0.8
+    FL_calf_joint: -1.5
+    RR_hip_joint: -0.1
+    RR_thigh_joint: 1.0
+    RR_calf_joint: -1.5
+    RL_hip_joint: 0.1
+    RL_thigh_joint: 1.0
+    RL_calf_joint: -1.5
+  joint_project_limits:
+    FR_hip_joint: [-0.87, 0.0]
+    FL_hip_joint: [0.0, 0.87]
+    RR_hip_joint: [-0.87, 0.0]
+    RL_hip_joint: [0.0, 0.87]
