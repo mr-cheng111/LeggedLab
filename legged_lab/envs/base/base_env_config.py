@@ -34,12 +34,14 @@ from .base_config import (
     EventCfg,
     Gemini2CameraCfg,
     HeightScannerCfg,
+    MotorStrengthCfg,
     NoiseCfg,
     NoiseScalesCfg,
     NormalizationCfg,
     ObsScalesCfg,
     PhysxCfg,
     RewardCfg,
+    RewardSettingsCfg,
     RobotCfg,
     SimCfg,
 )
@@ -74,6 +76,7 @@ class BaseEnvCfg:
         feet_body_names=MISSING,
     )
     reward = RewardCfg()
+    reward_settings: RewardSettingsCfg = RewardSettingsCfg()
     normalization: NormalizationCfg = NormalizationCfg(
         obs_scales=ObsScalesCfg(
             lin_vel=1.0,
@@ -163,6 +166,7 @@ class BaseEnvCfg:
             ),
         ),
         action_delay=ActionDelayCfg(enable=False, params={"max_delay": 5, "min_delay": 0}),
+        motor_strength=MotorStrengthCfg(enable=False, range=(1.0, 1.0)),
     )
     sim: SimCfg = SimCfg(dt=0.005, decimation=4, physx=PhysxCfg(gpu_max_rigid_patch_count=10 * 2**15))
 

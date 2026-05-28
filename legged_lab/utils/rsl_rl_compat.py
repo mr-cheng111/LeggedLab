@@ -77,7 +77,8 @@ def adapt_legacy_cfg_for_rsl_rl_v5(cfg_dict: dict) -> dict:
 
     policy_class = str(policy.get("class_name", "ActorCritic"))
     is_recurrent = "Recurrent" in policy_class
-    model_class_name = "RNNModel" if is_recurrent else "MLPModel"
+    requested_class = str(policy.get("class_name", "ActorCritic"))
+    model_class_name = requested_class if ":" in requested_class or "." in requested_class else ("RNNModel" if is_recurrent else "MLPModel")
     obs_norm = bool(out.get("empirical_normalization", False))
 
     actor_cfg = {
@@ -97,6 +98,29 @@ def adapt_legacy_cfg_for_rsl_rl_v5(cfg_dict: dict) -> dict:
         "activation": policy.get("activation", "elu"),
         "obs_normalization": obs_norm,
     }
+
+    if "WMPMLPModel" in model_class_name:
+        wmp_cfg = out.get("wmp") if isinstance(out.get("wmp"), dict) else {}
+        feature_type = wmp_cfg.get("feature_type", "deter")
+        wmp_feature_dim = 1536 if feature_type == "full" else 512
+        wmp_model_cfg = {
+            "wmp_key": wmp_cfg.get("obs_key", "wmp"),
+            "wmp_feature_dim": wmp_cfg.get("feature_dim", wmp_feature_dim),
+            "wmp_latent_dim": wmp_cfg.get("wm_latent_dim", 32),
+            "wmp_encoder_hidden_dims": wmp_cfg.get("wm_encoder_hidden_dims", [64, 64]),
+            "use_history_encoder": wmp_cfg.get("use_history_encoder", False),
+            "history_steps": wmp_cfg.get("history_steps", 5),
+            "history_dim_per_step": wmp_cfg.get("history_dim_per_step"),
+            "history_encoder_hidden_dims": wmp_cfg.get("history_encoder_hidden_dims", [256, 128]),
+            "history_latent_dim": wmp_cfg.get("history_latent_dim", 35),
+            "command_dim": wmp_cfg.get("command_dim", 3),
+            "command_start": wmp_cfg.get("command_start", 6),
+            "height_scan_dim": wmp_cfg.get("height_scan_dim", 0),
+            "history_excludes_trailing_height": wmp_cfg.get("history_excludes_trailing_height", True),
+            "critic_uses_history_encoder": wmp_cfg.get("critic_uses_history_encoder", False),
+        }
+        actor_cfg.update(wmp_model_cfg)
+        critic_cfg.update(wmp_model_cfg)
 
     if is_recurrent:
         # rsl_rl v5 的 RNNModel 参数名是 rnn_hidden_dim。

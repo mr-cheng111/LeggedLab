@@ -24,18 +24,11 @@ parser.add_argument(
     default=None,
     help="Override task terrain with a single WMP-style terrain preset.",
 )
-parser.add_argument(
-    "--rgb_camera_path",
-    type=str,
-    default=None,
-    help="RGB camera prim path under Robot.",
-)
-parser.add_argument(
-    "--depth_camera_path",
-    type=str,
-    default=None,
-    help="Depth camera prim path under Robot.",
-)
+parser.add_argument("--camera_model", choices=("pinhole", "fisheye"), default=None, help="Spawned camera model.")
+parser.add_argument("--camera_name", type=str, default=None, help="Logical spawned camera model name.")
+parser.add_argument("--camera_prim_path", type=str, default=None, help="Spawned camera prim path under Robot.")
+parser.add_argument("--camera_offset_pos", type=float, nargs=3, default=None, help="Spawned camera xyz offset.")
+parser.add_argument("--camera_offset_rot", type=float, nargs=4, default=None, help="Spawned camera wxyz offset.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -76,20 +69,27 @@ def main():
         env_cfg.device = args_cli.device
 
     env_cfg.scene.gemini2_camera.enable = True
-    if args_cli.rgb_camera_path is not None:
-        env_cfg.scene.gemini2_camera.rgb_camera_path = args_cli.rgb_camera_path
-    if args_cli.depth_camera_path is not None:
-        env_cfg.scene.gemini2_camera.depth_camera_path = args_cli.depth_camera_path
-    rgb_camera_prim_path = "{ENV_REGEX_NS}/Robot/" + env_cfg.scene.gemini2_camera.rgb_camera_path.strip("/")
-    depth_camera_prim_path = "{ENV_REGEX_NS}/Robot/" + env_cfg.scene.gemini2_camera.depth_camera_path.strip("/")
+    env_cfg.scene.gemini2_camera.enable_rgb = True
+    env_cfg.scene.gemini2_camera.enable_depth = True
+    env_cfg.scene.gemini2_camera.partial_camera = False
+    if args_cli.camera_model is not None:
+        env_cfg.scene.gemini2_camera.camera_model = args_cli.camera_model
+    if args_cli.camera_name is not None:
+        env_cfg.scene.gemini2_camera.model_name = args_cli.camera_name
+    if args_cli.camera_prim_path is not None:
+        env_cfg.scene.gemini2_camera.spawn_prim_path = args_cli.camera_prim_path
+    if args_cli.camera_offset_pos is not None:
+        env_cfg.scene.gemini2_camera.spawn_offset_pos = tuple(args_cli.camera_offset_pos)
+    if args_cli.camera_offset_rot is not None:
+        env_cfg.scene.gemini2_camera.spawn_offset_rot = tuple(args_cli.camera_offset_rot)
+    camera_prim_path = "{ENV_REGEX_NS}/Robot/" + env_cfg.scene.gemini2_camera.spawn_prim_path.strip("/")
 
     env_class = task_registry.get_task_class(args_cli.task)
     env = env_class(env_cfg, args_cli.headless)
     env.sim.set_camera_view(eye=[2.8, -2.8, 1.6], target=[0.0, 0.0, 0.45])
-    rgb_camera = env.scene.sensors["gemini2_rgb_camera"]
     depth_camera = env.scene.sensors["gemini2_depth_camera"]
-    print(f"[INFO] reading RGB camera prim: {rgb_camera_prim_path}")
-    print(f"[INFO] reading depth camera prim: {depth_camera_prim_path}")
+    rgb_camera = env.scene.sensors.get("gemini2_rgb_camera", depth_camera)
+    print(f"[INFO] reading spawned RGBD camera prim: {camera_prim_path}")
 
     rgb = None
     depth = None

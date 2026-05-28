@@ -80,6 +80,7 @@ def setup_wandb_env(logger_name: str):
 def train():
     runner: OnPolicyRunner
     env = None
+    exit_code = 1
 
     try:
         env_class_name = args_cli.task
@@ -88,6 +89,8 @@ def train():
 
         if args_cli.num_envs is not None:
             env_cfg.scene.num_envs = args_cli.num_envs
+        if getattr(args_cli, "wmp_camera_num_envs", None) is not None:
+            env_cfg.scene.gemini2_camera.partial_camera_num_envs = args_cli.wmp_camera_num_envs
         if args_cli.runner == "wmp_amp" and not getattr(args_cli, "enable_cameras", False):
             print("[WARN] WMP-AMP runner without --enable_cameras: using zero-depth fallback for dry smoke only.")
             env_cfg.scene.gemini2_camera.enable = False
@@ -169,6 +172,7 @@ def train():
             return
 
         runner.learn(num_learning_iterations=remaining_iterations, init_at_random_ep_len=True)
+        exit_code = 0
     except Exception:
         print("[ERROR] Training failed with exception:")
         traceback.print_exc()
@@ -183,6 +187,8 @@ def train():
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        if args_cli.headless:
+            os._exit(exit_code)
 
 
 if __name__ == "__main__":

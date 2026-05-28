@@ -22,7 +22,7 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 from legged_lab.envs import *  # noqa:F401,F403
-from legged_lab.world_models.wmp import WorldModel, depth_to_nchw, depth_to_wmp_image, make_default_wmp_config
+from legged_lab.world_models.wmp import DepthPredictor, WorldModel, depth_to_nchw, depth_to_wmp_image, make_default_wmp_config
 
 
 def _log(message: str):
@@ -53,28 +53,34 @@ def main():
         depth_camera = env.scene.sensors["gemini2_depth_camera"]
 
         depth = None
-        actor_obs = None
         for step_idx in range(args_cli.steps):
             _log(f"warmup step {step_idx + 1}/{args_cli.steps}")
             actions = torch.zeros(env.num_envs, env.num_actions, device=env.device)
             env.step(actions)
             depth = depth_camera.data.output["distance_to_image_plane"]
-            actor_obs, _ = env.compute_observations()
 
-        assert depth is not None and actor_obs is not None
+        assert depth is not None
         wm_device = args_cli.wm_device or env.device
         _log(f"preprocessing Gemini2 depth on device={wm_device}")
-        prop = actor_obs.to(wm_device)
+        prop = env.get_wmp_proprioception().to(wm_device)
+        forward_height_map = env.get_wmp_forward_height_map().to(wm_device)
+        camera_env_ids = env.get_depth_camera_env_ids()
         depth_nchw = depth_to_nchw(
             depth.to(wm_device),
             near=env_cfg.scene.gemini2_camera.depth_near,
             far=env_cfg.scene.gemini2_camera.depth_far,
         )
-        image = depth_to_wmp_image(
+        camera_image = depth_to_wmp_image(
             depth.to(wm_device),
             near=env_cfg.scene.gemini2_camera.depth_near,
             far=env_cfg.scene.gemini2_camera.depth_far,
         )
+        if camera_image.shape[0] == env.num_envs:
+            image = camera_image
+        else:
+            depth_predictor = DepthPredictor().to(wm_device)
+            image = depth_predictor(forward_height_map, prop)
+            image[camera_env_ids.to(wm_device)] = camera_image
         is_first = torch.ones(env.num_envs, device=wm_device)
 
         _log("constructing WMP WorldModel")
@@ -95,16 +101,21 @@ def main():
             decoded = world_model.decode(full_feat)["image"].mode()
 
         _log(f"depth raw shape={tuple(depth.shape)}")
+        _log(f"depth camera env ids shape={tuple(camera_env_ids.shape)}")
         _log(f"depth preprocessed NCHW shape={tuple(depth_nchw.shape)}")
         _log(f"WMP image NHWC shape={tuple(image.shape)}")
         _log(f"prop shape={tuple(prop.shape)}")
+        _log(f"forward height map shape={tuple(forward_height_map.shape)}")
         _log(f"encoder embed shape={tuple(embed.shape)}")
         _log(f"RSSM deter feature shape={tuple(deter_feat.shape)}")
         _log(f"RSSM full feature shape={tuple(full_feat.shape)}")
         _log(f"decoded image shape={tuple(decoded.shape)}")
 
-        assert depth_nchw.shape == (env.num_envs, 1, 64, 64)
+        assert depth_nchw.shape[1:] == (1, 64, 64)
+        assert depth_nchw.shape[0] == camera_env_ids.numel()
         assert image.shape == (env.num_envs, 64, 64, 1)
+        assert prop.shape == (env.num_envs, 33)
+        assert forward_height_map.shape == (env.num_envs, 525)
         assert deter_feat.shape == (env.num_envs, 512)
         assert full_feat.shape == (env.num_envs, 1536)
         assert decoded.shape == (env.num_envs, 64, 64, 1)

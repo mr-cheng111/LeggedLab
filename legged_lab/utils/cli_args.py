@@ -70,6 +70,54 @@ def add_rsl_rl_args(parser: argparse.ArgumentParser):
     arg_group.add_argument(
         "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
     )
+    arg_group.add_argument(
+        "--amp_num_preload_transitions",
+        type=int,
+        default=None,
+        help="Override AMP expert preload transitions for smoke tests.",
+    )
+    arg_group.add_argument(
+        "--amp_reward_coef",
+        type=float,
+        default=None,
+        help="Override AMP discriminator reward coefficient.",
+    )
+    arg_group.add_argument(
+        "--amp_task_reward_lerp",
+        type=float,
+        default=None,
+        help="Override AMP task reward lerp/mixing parameter.",
+    )
+    arg_group.add_argument(
+        "--wmp_camera_num_envs",
+        type=int,
+        default=None,
+        help="Override number of real WMP depth camera environments.",
+    )
+    arg_group.add_argument(
+        "--wmp_depth_training_iters",
+        type=int,
+        default=None,
+        help="Override DepthPredictor training iterations per training interval.",
+    )
+    arg_group.add_argument(
+        "--wmp_depth_batch_size",
+        type=int,
+        default=None,
+        help="Override DepthPredictor training batch size.",
+    )
+    arg_group.add_argument(
+        "--wmp_train_steps_per_iter",
+        type=int,
+        default=None,
+        help="Override world model gradient steps per PPO iteration.",
+    )
+    arg_group.add_argument(
+        "--wmp_train_interval",
+        type=int,
+        default=None,
+        help="Train world model every N PPO iterations after train_start_steps.",
+    )
 
 
 def update_rsl_rl_cfg(agent_cfg: BaseAgentConfig, args_cli: argparse.Namespace):
@@ -107,5 +155,23 @@ def update_rsl_rl_cfg(agent_cfg: BaseAgentConfig, args_cli: argparse.Namespace):
     if agent_cfg.logger in {"wandb", "neptune"} and args_cli.log_project_name:
         agent_cfg.wandb_project = args_cli.log_project_name
         agent_cfg.neptune_project = args_cli.log_project_name
+    if getattr(args_cli, "amp_num_preload_transitions", None) is not None and hasattr(agent_cfg, "amp"):
+        agent_cfg.amp["num_preload_transitions"] = args_cli.amp_num_preload_transitions
+    if getattr(args_cli, "amp_reward_coef", None) is not None and hasattr(agent_cfg, "amp"):
+        agent_cfg.amp["reward_coef"] = args_cli.amp_reward_coef
+    if getattr(args_cli, "amp_task_reward_lerp", None) is not None and hasattr(agent_cfg, "amp"):
+        agent_cfg.amp["task_reward_lerp"] = args_cli.amp_task_reward_lerp
+    if hasattr(agent_cfg, "wmp"):
+        if getattr(args_cli, "wmp_camera_num_envs", None) is not None:
+            agent_cfg.wmp["camera_num_envs"] = args_cli.wmp_camera_num_envs
+        if getattr(args_cli, "wmp_train_steps_per_iter", None) is not None:
+            agent_cfg.wmp["train_steps_per_iter"] = args_cli.wmp_train_steps_per_iter
+        if getattr(args_cli, "wmp_train_interval", None) is not None:
+            agent_cfg.wmp["train_interval"] = args_cli.wmp_train_interval
+        depth_cfg = agent_cfg.wmp.setdefault("depth_predictor", {})
+        if getattr(args_cli, "wmp_depth_training_iters", None) is not None:
+            depth_cfg["training_iters"] = args_cli.wmp_depth_training_iters
+        if getattr(args_cli, "wmp_depth_batch_size", None) is not None:
+            depth_cfg["batch_size"] = args_cli.wmp_depth_batch_size
 
     return agent_cfg

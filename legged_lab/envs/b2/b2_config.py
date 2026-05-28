@@ -17,7 +17,7 @@ from isaaclab.managers.scene_entity_cfg import SceneEntityCfg
 from isaaclab.utils import configclass
 
 import legged_lab.mdp as mdp
-from legged_lab.assets.unitree import B2_CFG, B2_RGBD_CFG
+from legged_lab.assets.unitree import B2_CFG
 from legged_lab.envs.base.base_env_config import (  # noqa:F401
     BaseAgentCfg,
     BaseEnvCfg,
@@ -337,7 +337,7 @@ class B2FlatEnvCfg(BaseEnvCfg):
         super().__post_init__()
 
         # 机器人与场景
-        self.scene.height_scanner.prim_body_name = "base"
+        self.scene.height_scanner.prim_body_name = "base_link"
         self.scene.robot = B2_CFG
         self.scene.terrain_type = "generator"
         self.scene.terrain_generator = GRAVEL_TERRAINS_CFG
@@ -412,15 +412,26 @@ class B2RoughAgentCfg(BaseAgentCfg):
 class B2RGBDFlatEnvCfg(B2FlatEnvCfg):
     """B2 RGBD 平地环境配置。
 
-    当前仅切换机器人 USD 资产到 b2_rgbd 版本；PPO 观测仍沿用本体观测。
-    后续世界模型训练可在该任务上接入 RGBD 相机数据。
+    使用原生 B2 机器人，RGBD 相机在环境 clone 完成后由传感器动态生成。
     """
 
     def __post_init__(self):
         super().__post_init__()
-        self.scene.robot = B2_RGBD_CFG
+        self.scene.robot = B2_CFG
         self.scene.height_scanner.prim_body_name = "base_link"
         self.scene.gemini2_camera.enable = True
+        self.scene.gemini2_camera.spawn_prim_path = "base_link/wmp_depth_camera"
+        self.scene.gemini2_camera.model_name = "wmp_front_depth"
+        self.scene.gemini2_camera.camera_model = "pinhole"
+        self.scene.gemini2_camera.spawn_offset_pos = (0.27, 0.0, 0.03)
+        self.scene.gemini2_camera.spawn_offset_rot = (1.0, 0.0, 0.0, 0.0)
+        self.scene.gemini2_camera.width = 64
+        self.scene.gemini2_camera.height = 64
+        self.scene.gemini2_camera.depth_near = 0.0
+        self.scene.gemini2_camera.depth_far = 2.0
+        self.scene.gemini2_camera.horizontal_fov_deg = 58.0
+        self.scene.gemini2_camera.randomize_rotation = True
+        self.scene.gemini2_camera.random_pitch_deg = (-5.0, 5.0)
 
 
 @configclass
@@ -586,7 +597,7 @@ class B2RGBDRoughEnvCfg(B2RoughEnvCfg):
 
     def __post_init__(self):
         super().__post_init__()
-        self.scene.robot = B2_RGBD_CFG
+        self.scene.robot = B2_CFG
         self.scene.height_scanner.prim_body_name = "base_link"
         self.scene.gemini2_camera.enable = True
 
@@ -605,10 +616,18 @@ class B2RGBDWMPAMPFlatEnvCfg(B2RGBDFlatEnvCfg):
 
     def __post_init__(self):
         super().__post_init__()
+        wmp_update_interval = 5
         self.scene.gemini2_camera.enable = True
         self.scene.gemini2_camera.enable_rgb = False
         self.scene.gemini2_camera.enable_depth = True
+        self.scene.gemini2_camera.partial_camera = True
+        self.scene.gemini2_camera.partial_camera_num_envs = 1024
+        self.scene.gemini2_camera.partial_camera_seed = 42
+        self.scene.gemini2_camera.partial_camera_force_tilt_crawl = True
+        self.scene.gemini2_camera.model_name = "wmp_front_depth"
+        self.scene.gemini2_camera.update_period = self.sim.dt * self.sim.decimation * wmp_update_interval
         self.scene.gemini2_camera.allow_missing_depth_fallback = True
+        self.sim.render_interval = self.sim.decimation * wmp_update_interval
 
 
 @configclass
@@ -634,11 +653,23 @@ class B2RGBDWMPAMPFlatAgentCfg(B2RGBDFlatAgentCfg):
     runner_class_name: str = "legged_lab.runners.wmp_amp_runner:WMPAMPRunner"
     wmp: dict = {
         "feature_type": "deter",
+        "update_interval": 5,
         "train_start_steps": 10000,
-        "train_steps_per_iter": 1,
+        "train_steps_per_iter": 10,
         "batch_size": 16,
         "batch_length": 64,
-        "replay_capacity": 50000,
+        "replay_capacity_episodes": 50000,
+        "replay_device": "cpu",
+        "use_depth_predictor": True,
+        "camera_sample_all_envs": False,
+        "camera_num_envs": 1024,
+        "camera_env_seed": 42,
+        "camera_force_tilt_crawl": True,
+        "depth_predictor": {
+            "training_interval": 10,
+            "training_iters": 1000,
+            "batch_size": 1024,
+        },
     }
     amp: dict = {
         "motion_files": [],
@@ -652,7 +683,7 @@ class B2RGBDWMPAMPFlatAgentCfg(B2RGBDFlatAgentCfg):
 
     def __post_init__(self):
         super().__post_init__()
-        self.policy.class_name = "MLPModel"
+        self.policy.class_name = "legged_lab.models:WMPMLPModel"
         self.algorithm.class_name = "legged_lab.algorithms.wmp_amp_ppo:WMPAMPPPO"
         self.policy.actor_hidden_dims = [256, 128, 64]
         self.policy.critic_hidden_dims = [512, 256, 128]

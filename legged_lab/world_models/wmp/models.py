@@ -155,3 +155,240 @@ class WMPReplayBuffer:
                 seqs.append(torch.stack([self.storage[start + offset][key] for offset in range(batch_length)], dim=1))
             batch[key] = torch.cat(seqs, dim=0)
         return batch
+
+
+class WMPEpisodeReplayBuffer:
+    """按 episode 存储 WMP 序列并采样连续片段。
+
+    原版 WMP 的 world model 以 depth update interval 为时间步。每条 transition
+    已经包含聚合后的动作：
+
+        a_wm[t] = concat(a[t-k+1], ..., a[t]), k = update_interval
+    """
+
+    def __init__(self, capacity_episodes: int, device: str):
+        self.capacity_episodes = int(capacity_episodes)
+        self.device = torch.device(device)
+        self.episodes: list[dict[str, torch.Tensor]] = []
+        self._current: dict[int, list[dict[str, torch.Tensor]]] = {}
+
+    def __len__(self):
+        return len(self.episodes)
+
+    @property
+    def num_steps(self) -> int:
+        return sum(int(next(iter(ep.values())).shape[0]) for ep in self.episodes)
+
+    def add_step(self, env_id: int, transition: dict[str, torch.Tensor]):
+        item = {k: v.detach().to(self.device).float().clone() for k, v in transition.items()}
+        self._current.setdefault(int(env_id), []).append(item)
+
+    def finish_episode(self, env_id: int):
+        env_id = int(env_id)
+        steps = self._current.pop(env_id, [])
+        if len(steps) < 2:
+            return
+        keys = steps[0].keys()
+        episode = {key: torch.stack([step[key] for step in steps], dim=0).to(self.device) for key in keys}
+        self.episodes.append(episode)
+        if len(self.episodes) > self.capacity_episodes:
+            self.episodes = self.episodes[-self.capacity_episodes :]
+
+    def can_sample(self, batch_size: int, batch_length: int) -> bool:
+        if batch_size <= 0:
+            return False
+        return any(next(iter(ep.values())).shape[0] >= batch_length for ep in self.episodes)
+
+    def sample(self, batch_size: int, batch_length: int) -> dict[str, torch.Tensor]:
+        valid = [ep for ep in self.episodes if next(iter(ep.values())).shape[0] >= batch_length]
+        if not valid:
+            raise RuntimeError("WMP episode replay buffer does not have enough sequence data.")
+        lengths = torch.tensor([next(iter(ep.values())).shape[0] for ep in valid], device=self.device, dtype=torch.float32)
+        probs = lengths / lengths.sum()
+        indices = torch.multinomial(probs, batch_size, replacement=True).tolist()
+        keys = valid[0].keys()
+        batch = {key: [] for key in keys}
+        for idx in indices:
+            ep = valid[idx]
+            ep_len = next(iter(ep.values())).shape[0]
+            start = int(torch.randint(0, ep_len - batch_length + 1, (1,), device=self.device).item())
+            for key in keys:
+                batch[key].append(ep[key][start : start + batch_length])
+        return {key: torch.stack(values, dim=0) for key, values in batch.items()}
+
+
+class WMPFixedEpisodeReplayBuffer:
+    """原版 WMP 风格的固定容量 replay。
+
+    原项目只保存每个 env 最近完成的一条 WMP episode：
+
+        dataset[env_id, t] <- current_episode[env_id, t]
+
+    depth 图像也只为真实相机 env 保存；非相机 env 在采样后由
+    DepthPredictor(forward_height_map, prop) 动态生成，避免把 64x64 图像
+    为所有 env 历史步都落到主机内存里。
+    """
+
+    def __init__(
+        self,
+        num_envs: int,
+        max_episode_steps: int,
+        camera_env_ids: torch.Tensor,
+        device: str,
+    ):
+        self.num_envs = int(num_envs)
+        self.max_episode_steps = int(max_episode_steps)
+        self.device = torch.device(device)
+        self.camera_env_ids = camera_env_ids.detach().cpu().long().unique(sorted=True)
+        self.camera_env_ids = self.camera_env_ids[
+            (self.camera_env_ids >= 0) & (self.camera_env_ids < self.num_envs)
+        ]
+        self.env_to_camera_slot = torch.full((self.num_envs,), -1, dtype=torch.long)
+        if self.camera_env_ids.numel() > 0:
+            self.env_to_camera_slot[self.camera_env_ids] = torch.arange(self.camera_env_ids.numel(), dtype=torch.long)
+
+        self.current_index = torch.zeros(self.num_envs, dtype=torch.long)
+        self.dataset_size = torch.zeros(self.num_envs, dtype=torch.long)
+        self.has_episode = torch.zeros(self.num_envs, dtype=torch.bool)
+        self._current: dict[str, torch.Tensor] | None = None
+        self._dataset: dict[str, torch.Tensor] | None = None
+        self._current_image: torch.Tensor | None = None
+        self._dataset_image: torch.Tensor | None = None
+
+    def __len__(self):
+        return int(self.has_episode.sum().item())
+
+    @property
+    def num_steps(self) -> int:
+        return int(self.dataset_size[self.has_episode].sum().item())
+
+    def add_step(self, env_id: int, transition: dict[str, torch.Tensor]):
+        if self._current is None:
+            self._init_storage(transition)
+        assert self._current is not None
+        assert self._dataset is not None
+
+        env_id = int(env_id)
+        step_id = int(self.current_index[env_id].item())
+        if step_id >= self.max_episode_steps:
+            return
+
+        for key, value in transition.items():
+            if key == "image":
+                continue
+            self._current[key][env_id, step_id].copy_(value.detach().to(self.device).float())
+
+        camera_slot = int(self.env_to_camera_slot[env_id].item())
+        has_real_depth = float(transition.get("has_real_depth", torch.zeros(1)).detach().flatten()[0].item()) > 0.5
+        if camera_slot >= 0 and has_real_depth and self._current_image is not None:
+            self._current_image[camera_slot, step_id].copy_(transition["image"].detach().to(self.device).float())
+        self.current_index[env_id] += 1
+
+    def finish_episode(self, env_id: int):
+        if self._current is None:
+            return
+        assert self._dataset is not None
+
+        env_id = int(env_id)
+        length = int(self.current_index[env_id].item())
+        self.current_index[env_id] = 0
+        if length < 2:
+            return
+
+        for key, current_value in self._current.items():
+            self._dataset[key][env_id, :length].copy_(current_value[env_id, :length])
+        camera_slot = int(self.env_to_camera_slot[env_id].item())
+        if camera_slot >= 0 and self._current_image is not None and self._dataset_image is not None:
+            self._dataset_image[camera_slot, :length].copy_(self._current_image[camera_slot, :length])
+
+        self.dataset_size[env_id] = length
+        self.has_episode[env_id] = True
+
+    def can_sample(self, batch_size: int, batch_length: int) -> bool:
+        if batch_size <= 0 or self._dataset is None:
+            return False
+        return bool(torch.any(self.dataset_size >= int(batch_length)).item())
+
+    def can_sample_real_depth(self, batch_size: int) -> bool:
+        if batch_size <= 0 or self._dataset is None or self._dataset_image is None:
+            return False
+        if self.camera_env_ids.numel() == 0:
+            return False
+        valid_camera_envs = self.camera_env_ids[self.dataset_size[self.camera_env_ids] > 0]
+        return bool(valid_camera_envs.numel() > 0)
+
+    def sample(self, batch_size: int, batch_length: int) -> dict[str, torch.Tensor]:
+        if not self.can_sample(batch_size, batch_length):
+            raise RuntimeError("WMP fixed replay buffer does not have enough sequence data.")
+        assert self._dataset is not None
+
+        batch_length = int(batch_length)
+        valid_envs = (self.dataset_size >= batch_length).nonzero(as_tuple=False).flatten()
+        lengths = self.dataset_size[valid_envs].float()
+        probs = lengths / lengths.sum().clamp_min(1.0)
+        sampled_slots = torch.multinomial(probs, int(batch_size), replacement=True)
+        env_ids = valid_envs[sampled_slots]
+
+        batch = {key: [] for key in self._dataset.keys()}
+        batch["image"] = []
+        for env_id_tensor in env_ids:
+            env_id = int(env_id_tensor.item())
+            ep_len = int(self.dataset_size[env_id].item())
+            start = int(torch.randint(0, ep_len - batch_length + 1, (1,)).item())
+            for key, value in self._dataset.items():
+                batch[key].append(value[env_id, start : start + batch_length])
+            batch["image"].append(self._sample_image(env_id, start, batch_length))
+        out = {key: torch.stack(values, dim=0) for key, values in batch.items()}
+        if "is_first" in out:
+            out["is_first"].zero_()
+            out["is_first"][:, 0] = 1.0
+        return out
+
+    def sample_real_depth(self, batch_size: int) -> dict[str, torch.Tensor]:
+        """只从真实相机 env 的有效时间步采样 DepthPredictor 监督数据。"""
+        if not self.can_sample_real_depth(batch_size):
+            raise RuntimeError("WMP fixed replay buffer does not have enough real depth samples.")
+        assert self._dataset is not None
+        assert self._dataset_image is not None
+
+        valid_envs = self.camera_env_ids[self.dataset_size[self.camera_env_ids] > 0]
+        lengths = self.dataset_size[valid_envs].float()
+        probs = lengths / lengths.sum().clamp_min(1.0)
+        sampled_slots = torch.multinomial(probs, int(batch_size), replacement=True)
+        env_ids = valid_envs[sampled_slots]
+
+        batch = {"forward_height_map": [], "prop": [], "image": []}
+        for env_id_tensor in env_ids:
+            env_id = int(env_id_tensor.item())
+            ep_len = int(self.dataset_size[env_id].item())
+            step_id = int(torch.randint(0, ep_len, (1,)).item())
+            camera_slot = int(self.env_to_camera_slot[env_id].item())
+            batch["forward_height_map"].append(self._dataset["forward_height_map"][env_id, step_id])
+            batch["prop"].append(self._dataset["prop"][env_id, step_id])
+            batch["image"].append(self._dataset_image[camera_slot, step_id])
+        return {key: torch.stack(values, dim=0) for key, values in batch.items()}
+
+    def _init_storage(self, transition: dict[str, torch.Tensor]):
+        self._current = {}
+        self._dataset = {}
+        for key, value in transition.items():
+            if key == "image":
+                continue
+            shape = (self.num_envs, self.max_episode_steps) + tuple(value.shape)
+            self._current[key] = torch.zeros(shape, device=self.device, dtype=torch.float32)
+            self._dataset[key] = torch.zeros(shape, device=self.device, dtype=torch.float32)
+
+        image_shape = tuple(transition["image"].shape)
+        camera_count = int(self.camera_env_ids.numel())
+        if camera_count > 0:
+            shape = (camera_count, self.max_episode_steps) + image_shape
+            self._current_image = torch.zeros(shape, device=self.device, dtype=torch.float32)
+            self._dataset_image = torch.zeros(shape, device=self.device, dtype=torch.float32)
+
+    def _sample_image(self, env_id: int, start: int, batch_length: int) -> torch.Tensor:
+        if self._dataset_image is None:
+            raise RuntimeError("WMP fixed replay image storage has not been initialized.")
+        camera_slot = int(self.env_to_camera_slot[env_id].item())
+        if camera_slot >= 0:
+            return self._dataset_image[camera_slot, start : start + batch_length]
+        return torch.zeros_like(self._dataset_image[0, start : start + batch_length])

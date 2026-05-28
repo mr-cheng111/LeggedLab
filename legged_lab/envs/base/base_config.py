@@ -27,34 +27,71 @@ class RewardCfg:
 
 
 @configclass
+class RewardSettingsCfg:
+    """环境层奖励后处理配置。
+
+    IsaacLab 的 RewardManager 只接受 RewardTermCfg 字段，因此原版 WMP 的
+    `only_positive_rewards` 与 reward curriculum 放在独立配置里处理。
+    """
+
+    only_positive_rewards: bool = False
+    reward_curriculum: bool = False
+    reward_curriculum_term: tuple[str, ...] = ()
+    reward_curriculum_schedule: tuple[tuple[float, float, float, float], ...] = ()
+
+
+@configclass
 class HeightScannerCfg:
     enable_height_scan: bool = False
     prim_body_name: str = MISSING
     resolution: float = 0.1
     size: tuple = (1.6, 1.0)
+    forward_resolution: float = 0.1
+    forward_size: tuple = (2.0, 2.4)
     debug_vis: bool = False
     drift_range: tuple = (0.0, 0.0)
 
 
 @configclass
 class Gemini2CameraCfg:
-    """Orbbec Gemini2 RGBD 相机配置。
+    """RGBD 相机配置。
 
-    相机 prim 已经存在于机器人 USD 中，因此 SceneCfg 中使用 spawn=None 绑定已有 prim。
+    RGBD 相机统一在 InteractiveScene clone 完成后生成到机器人 body 下。
+    WMP 可通过 partial_camera 只为部分 env 生成真实相机。
     """
 
     enable: bool = False
     enable_rgb: bool = True
     enable_depth: bool = True
-    rgb_camera_path: str = "base_link/RGBD_link/Gemini2/Orbbec_Gemini2/camera_rgb/camera_rgb/Stream_rgb"
-    depth_camera_path: str = "base_link/RGBD_link/Gemini2/Orbbec_Gemini2/camera_ir_left/camera_left/Stream_depth"
-    width: int = 320
-    height: int = 180
+    model_name: str = "wmp_front_depth"
+    camera_model: str = "pinhole"
+    width: int = 64
+    height: int = 64
     update_period: float = 0.0
-    depth_near: float = 0.15
-    depth_far: float = 10.0
+    depth_near: float = 0.0
+    depth_far: float = 2.0
+    render_depth_near: float = 0.01
+    render_depth_far: float | None = None
     depth_clipping_behavior: str = "none"
     allow_missing_depth_fallback: bool = False
+    partial_camera: bool = False
+    partial_camera_num_envs: int | None = 1024
+    partial_camera_seed: int = 42
+    partial_camera_force_tilt_crawl: bool = True
+    spawn_prim_path: str = "base/wmp_depth_camera"
+    spawn_offset_pos: tuple[float, float, float] = (0.27, 0.0, 0.03)
+    spawn_offset_rot: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
+    spawn_offset_convention: str = "world"
+    horizontal_aperture: float = 20.955
+    vertical_aperture: float | None = None
+    horizontal_fov_deg: float | None = 58.0
+    randomize_rotation: bool = True
+    randomize_rotation_seed: int | None = None
+    random_roll_deg: tuple[float, float] = (0.0, 0.0)
+    random_pitch_deg: tuple[float, float] = (-5.0, 5.0)
+    random_yaw_deg: tuple[float, float] = (0.0, 0.0)
+    focal_length: float = 18.9002
+    focus_distance: float = 400.0
 
 
 @configclass
@@ -196,9 +233,16 @@ class ActionDelayCfg:
 
 
 @configclass
+class MotorStrengthCfg:
+    enable: bool = False
+    range: tuple[float, float] = (1.0, 1.0)
+
+
+@configclass
 class DomainRandCfg:
     events: EventCfg = EventCfg()
     action_delay: ActionDelayCfg = ActionDelayCfg()
+    motor_strength: MotorStrengthCfg = MotorStrengthCfg()
 
 
 @configclass
@@ -210,4 +254,5 @@ class PhysxCfg:
 class SimCfg:
     dt: float = 0.005
     decimation: int = 4
+    render_interval: int | None = None
     physx: PhysxCfg = PhysxCfg()

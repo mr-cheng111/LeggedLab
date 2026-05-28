@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import glob
 import os
+import resource
 import time
 
 import torch
@@ -16,7 +17,7 @@ from tensordict import TensorDict
 
 from legged_lab.algorithms import WMPAMPPPO
 from legged_lab.amp import AMPDiscriminator, AMPLoader, Normalizer
-from legged_lab.world_models.wmp import WMPReplayBuffer, WorldModel, depth_to_wmp_image, make_default_wmp_config
+from legged_lab.world_models.wmp import WMPTrainingController, WorldModel, make_default_wmp_config
 
 
 class WMPAMPRunner:
@@ -38,7 +39,6 @@ class WMPAMPRunner:
         )
         self.alg = self._build_algorithm(obs)
         self._build_amp()
-        self.wm_replay = WMPReplayBuffer(self.cfg["wmp"].get("replay_capacity", 50000), self.wm_device)
         self.logger = Logger(log_dir, self.cfg, self.env.cfg, self.env.num_envs, False, 1, 0, self.device)
 
     def _feature_dim_from_cfg(self):
@@ -49,14 +49,32 @@ class WMPAMPRunner:
         wmp_cfg = self.cfg.get("wmp", {})
         self.wm_device = wmp_cfg.get("device", self.device)
         prop_dim = self.env.get_wmp_proprioception().shape[-1]
-        wm_config = make_default_wmp_config(device=self.wm_device, num_actions=self.env.num_actions)
+        update_interval = int(wmp_cfg.get("update_interval", wmp_cfg.get("wmp_update_interval", 5)))
+        wm_config = make_default_wmp_config(device=self.wm_device, num_actions=self.env.num_actions * update_interval)
+        wm_config.env_num_actions = self.env.num_actions
+        wm_config.action_dim = self.env.num_actions * update_interval
+        wm_config.update_interval = update_interval
+        wm_config.prop_dim = prop_dim
         for key, value in wmp_cfg.items():
+            if key == "depth_predictor" and isinstance(value, dict):
+                for dp_key, dp_value in value.items():
+                    if hasattr(wm_config.depth_predictor, dp_key):
+                        setattr(wm_config.depth_predictor, dp_key, dp_value)
+                continue
+            if key == "wmp_update_interval":
+                key = "update_interval"
             if hasattr(wm_config, key):
                 setattr(wm_config, key, value)
         self.wm_config = wm_config
         self.world_model = WorldModel(wm_config, {"prop": (prop_dim,), "image": (64, 64, 1)}, use_camera=True).to(self.wm_device)
         self.wm_feature_dim = self.world_model.feature_dim if wm_config.feature_type == "full" else self.world_model.deter_dim
-        print(f"[INFO] WMP prop_dim={prop_dim}, feature_dim={self.wm_feature_dim}, device={self.wm_device}")
+        self.wmp_controller = WMPTrainingController(self.env, wm_config, self.world_model)
+        print(
+            f"[INFO] WMP prop_dim={prop_dim}, action_dim={wm_config.action_dim}, "
+            f"update_interval={wm_config.update_interval}, feature_dim={self.wm_feature_dim}, "
+            f"camera_envs={int(self.wmp_controller.camera_env_ids.numel())}/{self.env.num_envs}, "
+            f"replay_device={wm_config.replay_device}, device={self.wm_device}"
+        )
 
     def _build_algorithm(self, obs):
         cfg = self.cfg
@@ -75,13 +93,18 @@ class WMPAMPRunner:
     def _build_amp(self):
         amp_cfg = self.cfg.get("amp", {})
         motion_files = amp_cfg.get("motion_files") or sorted(glob.glob("datasets/wmp_mocap_motions/*.txt"))
+        canonical_dim = int(amp_cfg.get("canonical_obs_dim", 30))
+        retarget_adapter = self._make_amp_retarget_adapter(amp_cfg)
         amp_data = AMPLoader(
             self.device,
             time_between_frames=self.env.step_dt,
             motion_files=motion_files,
+            retarget_adapter=retarget_adapter,
             preload_transitions=True,
             num_preload_transitions=amp_cfg.get("num_preload_transitions", 100000),
         )
+        if amp_data.observation_dim != canonical_dim:
+            raise ValueError(f"AMP expert dim={amp_data.observation_dim}, expected canonical_obs_dim={canonical_dim}.")
         discriminator = AMPDiscriminator(
             amp_data.observation_dim * 2,
             amp_cfg.get("reward_coef", 2.0),
@@ -90,6 +113,10 @@ class WMPAMPRunner:
             amp_cfg.get("task_reward_lerp", 0.0),
         ).to(self.device)
         normalizer = Normalizer(amp_data.observation_dim, device=self.device)
+        if amp_cfg.get("preload_normalizer", True):
+            expert_state, expert_next_state = amp_data.get_preloaded_transitions()
+            normalizer.update(expert_state)
+            normalizer.update(expert_next_state)
         self.alg.attach_amp(
             discriminator,
             amp_data,
@@ -97,6 +124,42 @@ class WMPAMPRunner:
             amp_cfg.get("replay_buffer_size", 100000),
             amp_cfg.get("grad_penalty_coef", 1.0),
         )
+        retarget_name = retarget_adapter.__class__.__name__
+        print(
+            f"[INFO] WMP-AMP enabled: expert_dim={amp_data.observation_dim}, "
+            f"retarget={retarget_name}, preload_normalizer={amp_cfg.get('preload_normalizer', True)}, "
+            f"reward_coef={amp_cfg.get('reward_coef', 2.0)}, task_reward_lerp={amp_cfg.get('task_reward_lerp', 0.0)}"
+        )
+        self._log_amp_joint_stats(amp_data)
+
+    def _make_amp_retarget_adapter(self, amp_cfg: dict):
+        retarget_cfg = amp_cfg.get("retarget_adapter", {}) or {}
+        retarget_class_path = retarget_cfg.get("class_path", "legged_lab.amp.retarget:NoOpRetargetAdapter")
+        retarget_kwargs = {k: v for k, v in retarget_cfg.items() if k != "class_path"}
+        if retarget_kwargs.get("target_joint_order") == "env":
+            retarget_kwargs["target_joint_order"] = list(self.env.robot.joint_names)
+        return resolve_callable(retarget_class_path)(
+            canonical_obs_dim=int(amp_cfg.get("canonical_obs_dim", 30)),
+            **retarget_kwargs,
+        )
+
+    def _log_amp_joint_stats(self, amp_data: AMPLoader):
+        if not hasattr(amp_data, "preloaded_s"):
+            return
+        expert_joint_pos = amp_data.preloaded_s[:, :12].detach()
+        policy_joint_pos = self.env.get_amp_observations()[:, :12].detach().to(expert_joint_pos.device)
+        expert_mean = expert_joint_pos.mean(dim=0)
+        expert_min = expert_joint_pos.amin(dim=0)
+        expert_max = expert_joint_pos.amax(dim=0)
+        policy_mean = policy_joint_pos.mean(dim=0)
+        joint_names = list(self.env.robot.joint_names)
+        print("[INFO] WMP-AMP joint stats after expert retarget (expert_mean[min,max] vs current_env_mean):")
+        for idx, joint_name in enumerate(joint_names[:12]):
+            print(
+                f"[INFO]   {joint_name}: "
+                f"{expert_mean[idx].item():+.3f}[{expert_min[idx].item():+.3f},{expert_max[idx].item():+.3f}] "
+                f"vs {policy_mean[idx].item():+.3f}"
+            )
 
     def _augment_obs(self, obs: TensorDict, wm_feature: torch.Tensor):
         obs = obs.to(self.device)
@@ -104,14 +167,9 @@ class WMPAMPRunner:
         return obs
 
     def _read_wm_obs(self, is_first):
-        depth = self.env.get_depth_observations()
-        image = depth_to_wmp_image(
-            depth,
-            near=self.env.cfg.scene.gemini2_camera.depth_near,
-            far=self.env.cfg.scene.gemini2_camera.depth_far,
-        ).to(self.wm_device)
-        prop = self.env.get_wmp_proprioception().to(self.wm_device)
-        return {"prop": prop, "image": image, "is_first": is_first.to(self.wm_device)}
+        del is_first
+        wm_obs, _ = self.wmp_controller.observe_before_policy()
+        return wm_obs
 
     def _wm_feature(self, latent):
         if self.wm_config.feature_type == "full":
@@ -119,35 +177,28 @@ class WMPAMPRunner:
         return self.world_model.dynamics.get_deter_feat(latent)
 
     def _train_world_model(self):
-        metrics = {}
-        if not self.wm_replay.can_sample(self.wm_config.batch_size, self.wm_config.batch_length):
-            return metrics
-        for _ in range(self.wm_config.train_steps_per_iter):
-            batch = self.wm_replay.sample(self.wm_config.batch_size, self.wm_config.batch_length)
-            _, _, metrics = self.world_model._train(batch)
-        return {f"wm_{k}": v for k, v in metrics.items()}
+        return self.wmp_controller.train_if_ready(self.current_learning_iteration, self.total_env_steps)
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=int(self.env.max_episode_length))
         self.alg.train_mode()
         self.logger.init_logging_writer()
-        wm_latent = None
-        wm_action = torch.zeros(self.env.num_envs, self.env.num_actions, device=self.wm_device)
-        is_first = torch.ones(self.env.num_envs, device=self.wm_device)
+        self.total_env_steps = self.current_learning_iteration * self.cfg["num_steps_per_env"] * self.env.num_envs
         wm_feature = torch.zeros(self.env.num_envs, self.wm_feature_dim, device=self.device)
         obs = self._augment_obs(self.env.get_observations().to(self.device), wm_feature)
         start_it = self.current_learning_iteration
         total_it = start_it + num_learning_iterations
 
         for it in range(start_it, total_it):
+            curriculum_logs = {}
+            if hasattr(self.env, "update_reward_curriculum"):
+                curriculum_logs = self.env.update_reward_curriculum(it)
             start = time.time()
             with torch.inference_mode():
                 for _ in range(self.cfg["num_steps_per_env"]):
-                    wm_obs = self._read_wm_obs(is_first)
-                    wm_embed = self.world_model.encoder(wm_obs)
-                    wm_latent, _ = self.world_model.dynamics.obs_step(wm_latent, wm_action, wm_embed, wm_obs["is_first"])
-                    wm_feature = self._wm_feature(wm_latent).to(self.device)
+                    wm_obs, wm_feature = self.wmp_controller.observe_before_policy()
+                    wm_feature = wm_feature.to(self.device)
                     obs = self._augment_obs(obs, wm_feature)
                     amp_obs = self.env.get_amp_observations().to(self.device)
                     actions = self.alg.act(obs, amp_obs=amp_obs)
@@ -155,18 +206,8 @@ class WMPAMPRunner:
                     next_amp_obs = self.env.get_amp_observations().to(self.device)
                     if self.cfg.get("check_for_nan", True):
                         check_nan(next_obs, rewards, dones)
-                    self.wm_replay.add(
-                        {
-                            "prop": wm_obs["prop"],
-                            "image": wm_obs["image"],
-                            "action": actions.to(self.wm_device),
-                            "reward": rewards.to(self.wm_device).unsqueeze(-1),
-                            "is_first": is_first.to(self.wm_device),
-                            "is_terminal": dones.to(self.wm_device).float(),
-                        }
-                    )
-                    is_first = dones.to(self.wm_device).float()
-                    wm_action = actions.to(self.wm_device)
+                    self.wmp_controller.after_env_step(actions, rewards, dones, wm_obs)
+                    self.total_env_steps += self.env.num_envs
                     next_obs = self._augment_obs(next_obs.to(self.device), wm_feature)
                     task_rewards = rewards.to(self.device)
                     dones = dones.to(self.device)
@@ -195,9 +236,13 @@ class WMPAMPRunner:
                 start = time.time()
                 self.alg.compute_returns(obs)
 
+            update_start = time.time()
             loss_dict = self.alg.update()
-            if it * self.cfg["num_steps_per_env"] * self.env.num_envs >= self.wm_config.train_start_steps:
-                loss_dict.update(self._train_world_model())
+            loss_dict["time/ppo_update"] = time.time() - update_start
+            loss_dict.update(curriculum_logs)
+            loss_dict.update(self.wmp_controller.train_if_ready(it, self.total_env_steps))
+            loss_dict.update(self.wmp_controller.replay_stats())
+            loss_dict.update(self._resource_stats())
             learn_time = time.time() - start
             self.current_learning_iteration = it
             self.logger.log(
@@ -221,10 +266,19 @@ class WMPAMPRunner:
         saved = self.alg.save()
         saved["world_model_state_dict"] = self.world_model.state_dict()
         saved["world_model_optimizer_state_dict"] = self.world_model.model_opt.state_dict()
+        saved.update(self.wmp_controller.state_dict())
         saved["iter"] = self.current_learning_iteration
         saved["infos"] = infos
         torch.save(saved, path)
         self.logger.save_model(path, self.current_learning_iteration)
+
+    def _resource_stats(self) -> dict[str, float]:
+        stats = {"cpu_rss_gb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024.0 * 1024.0)}
+        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+            device = torch.device(self.device)
+            stats["gpu_alloc_gb"] = torch.cuda.memory_allocated(device) / (1024.0**3)
+            stats["gpu_reserved_gb"] = torch.cuda.memory_reserved(device) / (1024.0**3)
+        return stats
 
     def load(self, path: str, load_cfg: dict | None = None, strict: bool = True, map_location: str | None = None):
         loaded = torch.load(path, weights_only=False, map_location=map_location)
@@ -235,6 +289,7 @@ class WMPAMPRunner:
         if load_cfg is None or load_cfg.get("optimizer", True):
             if "world_model_optimizer_state_dict" in loaded:
                 self.world_model.model_opt.load_state_dict(loaded["world_model_optimizer_state_dict"])
+        self.wmp_controller.load_state_dict(loaded, strict=strict, load_optimizer=(load_cfg is None or load_cfg.get("optimizer", True)))
         return loaded.get("infos")
 
     def get_inference_policy(self, device: str | None = None):

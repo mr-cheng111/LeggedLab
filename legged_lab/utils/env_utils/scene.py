@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import ContactSensorCfg, TiledCameraCfg, patterns
+from isaaclab.sensors import ContactSensorCfg, patterns
 from isaaclab.terrains.terrain_importer_cfg import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
@@ -78,7 +78,7 @@ class SceneCfg(InteractiveSceneCfg):
             self.height_scanner = RayCasterCfg(
                 prim_path="{ENV_REGEX_NS}/Robot/" + config.height_scanner.prim_body_name,
                 offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
-                attach_yaw_only=True,
+                ray_alignment="yaw",
                 pattern_cfg=patterns.GridPatternCfg(
                     resolution=config.height_scanner.resolution, size=config.height_scanner.size
                 ),
@@ -87,26 +87,16 @@ class SceneCfg(InteractiveSceneCfg):
                 update_period=step_dt,
                 drift_range=config.height_scanner.drift_range,
             )
-
-        if config.gemini2_camera.enable:
-            rgb_prim_path = "{ENV_REGEX_NS}/Robot/" + config.gemini2_camera.rgb_camera_path.strip("/")
-            depth_prim_path = "{ENV_REGEX_NS}/Robot/" + config.gemini2_camera.depth_camera_path.strip("/")
-            if config.gemini2_camera.enable_rgb:
-                self.gemini2_rgb_camera = TiledCameraCfg(
-                    prim_path=rgb_prim_path,
-                    update_period=config.gemini2_camera.update_period,
-                    width=config.gemini2_camera.width,
-                    height=config.gemini2_camera.height,
-                    data_types=["rgb"],
-                    spawn=None,
-                )
-            if config.gemini2_camera.enable_depth:
-                self.gemini2_depth_camera = TiledCameraCfg(
-                    prim_path=depth_prim_path,
-                    update_period=config.gemini2_camera.update_period,
-                    width=config.gemini2_camera.width,
-                    height=config.gemini2_camera.height,
-                    data_types=["distance_to_image_plane"],
-                    depth_clipping_behavior=config.gemini2_camera.depth_clipping_behavior,
-                    spawn=None,
-                )
+            self.forward_height_scanner = RayCasterCfg(
+                prim_path="{ENV_REGEX_NS}/Robot/" + config.height_scanner.prim_body_name,
+                offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
+                ray_alignment="yaw",
+                pattern_cfg=patterns.GridPatternCfg(
+                    resolution=config.height_scanner.forward_resolution,
+                    size=config.height_scanner.forward_size,
+                ),
+                debug_vis=False,
+                mesh_prim_paths=["/World/ground"],
+                update_period=step_dt,
+                drift_range=(0.0, 0.0),
+            )

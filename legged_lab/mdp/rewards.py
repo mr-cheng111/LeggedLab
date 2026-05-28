@@ -45,13 +45,31 @@ def push_by_setting_velocity_with_recovery_marker(
 
 
 def track_lin_vel_xy_yaw_frame_exp(
-    env: BaseEnv, std: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+    env: BaseEnv, std: float, lin_vel_clip: float | None = None, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:
+    """跟踪 yaw frame 下的水平速度命令。
+
+    原始形式:
+        r = exp(-||v_cmd - v_xy||^2 / std^2)
+
+    ByteDance WMP A1 额外使用 `lin_vel_clip=0.1` 做容差裁剪：
+        v_clip = clip(v, v_cmd - c, v_cmd + c)
+        r = exp(-||v_cmd - v_clip||^2 / sigma)
+
+    这里的 `std` 与 IsaacLab 现有配置保持一致，满足 std^2 = sigma。
+    """
     asset: Articulation = env.scene[asset_cfg.name]
     vel_yaw = math_utils.quat_apply_inverse(
         math_utils.yaw_quat(asset.data.root_quat_w), asset.data.root_lin_vel_w[:, :3]
     )
-    lin_vel_error = torch.sum(torch.square(env.command_generator.command[:, :2] - vel_yaw[:, :2]), dim=1)
+    command = env.command_generator.command[:, :2]
+    lin_vel = vel_yaw[:, :2]
+    if lin_vel_clip is not None and lin_vel_clip > 0.0:
+        clip = float(lin_vel_clip)
+        upper = torch.where(command < 0.0, torch.full_like(command, 1.0e5), command + clip)
+        lower = torch.where(command > 0.0, torch.full_like(command, -1.0e5), command - clip)
+        lin_vel = torch.clip(lin_vel, lower, upper)
+    lin_vel_error = torch.sum(torch.square(command - lin_vel), dim=1)
     return torch.exp(-lin_vel_error / std**2)
 
 

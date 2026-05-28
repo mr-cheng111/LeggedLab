@@ -13,6 +13,19 @@ from legged_lab.amp import AMPDiscriminator, AMPLoader, AMPReplayBuffer, Normali
 
 
 class WMPAMPPPO(PPO):
+    def __init__(
+        self,
+        *args,
+        vel_predict_coef: float = 0.0,
+        vel_target_start: int = 45,
+        vel_target_dim: int = 3,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.vel_predict_coef = float(vel_predict_coef)
+        self.vel_target_start = int(vel_target_start)
+        self.vel_target_dim = int(vel_target_dim)
+
     def attach_amp(
         self,
         discriminator: AMPDiscriminator,
@@ -118,6 +131,18 @@ class WMPAMPPPO(PPO):
             else:
                 value_loss = (batch.returns - values).pow(2).mean()
             vel_predict_loss = torch.zeros((), device=self.device)
+            if self.vel_predict_coef > 0.0 and hasattr(self.actor, "predict_linear_velocity"):
+                predicted_linear_vel = self.actor.predict_linear_velocity(batch.observations)
+                target_start = self.vel_target_start
+                target_end = target_start + self.vel_target_dim
+                target_linear_vel = batch.observations["critic"][..., target_start:target_end]
+                if target_linear_vel.shape[-1] != predicted_linear_vel.shape[-1]:
+                    raise RuntimeError(
+                        "Velocity prediction target dim mismatch: "
+                        f"pred={predicted_linear_vel.shape[-1]}, target={target_linear_vel.shape[-1]}, "
+                        f"slice=({target_start}, {target_end})."
+                    )
+                vel_predict_loss = torch.nn.functional.mse_loss(predicted_linear_vel, target_linear_vel)
 
             policy_state, policy_next_state = policy_batch
             expert_state, expert_next_state = expert_batch
@@ -141,7 +166,7 @@ class WMPAMPPPO(PPO):
             amp_loss = 0.5 * (expert_loss + policy_loss)
             loss = (
                 surrogate_loss
-                + vel_predict_loss
+                + self.vel_predict_coef * vel_predict_loss
                 + self.value_loss_coef * value_loss
                 - self.entropy_coef * entropy.mean()
                 + amp_loss

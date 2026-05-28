@@ -13,6 +13,7 @@ from isaaclab.utils import configclass
 import legged_lab.mdp as mdp
 from legged_lab.assets.unitree import A1_CFG
 from legged_lab.envs.base.base_env_config import BaseAgentCfg, BaseEnvCfg, RewardCfg
+from legged_lab.terrains import WMP_MIXED_TERRAINS_CFG
 
 
 @configclass
@@ -130,3 +131,247 @@ class A1AMPFlatAgentCfg(BaseAgentCfg):
         self.num_steps_per_env = 24
         self.save_interval = 1000
         self.obs_groups = {"actor": ["policy"], "critic": ["critic"]}
+
+
+@configclass
+class A1WMPAMPRewardCfg(A1AMPRewardCfg):
+    """A1 WMP-AMP 地形奖励，对齐 bytedance/WMP A1AMPCfg。"""
+
+    track_lin_vel_xy_exp = RewTerm(
+        func=mdp.track_lin_vel_xy_yaw_frame_exp,
+        weight=1.5,
+        params={"std": 0.15**0.5, "lin_vel_clip": 0.1},
+    )
+    track_ang_vel_z_exp = RewTerm(func=mdp.track_ang_vel_z_world_exp, weight=0.5, params={"std": 0.15**0.5})
+    lin_vel_z_l2 = RewTerm(func=mdp.lin_vel_z_l2, weight=-1.0)
+    ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=0.0)
+    energy = RewTerm(func=mdp.energy, weight=-1.0e-4)
+    dof_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
+    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.03)
+    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=0.0)
+    termination_penalty = RewTerm(func=mdp.is_terminated, weight=0.0)
+    feet_air_time = RewTerm(
+        func=mdp.feet_air_time_quadruped,
+        weight=0.5,
+        params={"sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*foot.*"), "threshold": 0.5},
+    )
+    undesired_contacts = RewTerm(
+        func=mdp.undesired_contacts,
+        weight=-1.0,
+        params={"sensor_cfg": SceneEntityCfg("contact_sensor", body_names="(?!.*foot.*).*"), "threshold": 0.1},
+    )
+    feet_stumble = RewTerm(
+        func=mdp.feet_stumble,
+        weight=-0.1,
+        params={"sensor_cfg": SceneEntityCfg("contact_sensor", body_names=[".*foot.*"])},
+    )
+    dof_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=0.0)
+
+    feet_edge = RewTerm(
+        func=mdp.feet_edge,
+        weight=-1.0,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_sensor", body_names=".*foot.*"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*foot.*"),
+        },
+    )
+    dof_error = RewTerm(func=mdp.dof_error_l2, weight=-0.04)
+    cheat = RewTerm(func=mdp.cheat_yaw, weight=-1.0, params={"heading_limit": 1.0})
+    stuck = RewTerm(func=mdp.stuck, weight=-1.0, params={"velocity_threshold": 0.1, "command_threshold": 0.1})
+
+
+@configclass
+class A1WMPAMPTerrainEnvCfg(A1AMPFlatEnvCfg):
+    """A1 完整 WMP-AMP 地形测试任务。"""
+
+    reward = A1WMPAMPRewardCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+        wmp_update_interval = 5
+        self.scene.robot = A1_CFG.replace(
+            init_state=A1_CFG.init_state.replace(pos=(0.0, 0.0, 0.35)),
+            actuators={
+                "base_legs": A1_CFG.actuators["base_legs"].replace(
+                    stiffness=40.0,
+                    damping=1.0,
+                )
+            },
+        )
+        self.scene.terrain_type = "generator"
+        self.scene.terrain_generator = WMP_MIXED_TERRAINS_CFG
+        self.scene.max_init_terrain_level = 0
+        self.scene.height_scanner.enable_height_scan = True
+        self.scene.height_scanner.prim_body_name = "trunk"
+        self.scene.gemini2_camera.enable = True
+        self.scene.gemini2_camera.enable_rgb = False
+        self.scene.gemini2_camera.enable_depth = True
+        self.scene.gemini2_camera.partial_camera = True
+        self.scene.gemini2_camera.partial_camera_num_envs = 1024
+        self.scene.gemini2_camera.partial_camera_seed = 42
+        self.scene.gemini2_camera.partial_camera_force_tilt_crawl = True
+        self.scene.gemini2_camera.model_name = "wmp_front_depth"
+        self.scene.gemini2_camera.camera_model = "pinhole"
+        self.scene.gemini2_camera.spawn_prim_path = "trunk/wmp_depth_camera"
+        self.scene.gemini2_camera.spawn_offset_pos = (0.27, 0.0, 0.10)
+        self.scene.gemini2_camera.spawn_offset_rot = (1.0, 0.0, 0.0, 0.0)
+        self.scene.gemini2_camera.width = 64
+        self.scene.gemini2_camera.height = 64
+        self.scene.gemini2_camera.depth_near = 0.0
+        self.scene.gemini2_camera.depth_far = 2.0
+        self.scene.gemini2_camera.horizontal_fov_deg = 58.0
+        self.scene.gemini2_camera.randomize_rotation = False
+        self.scene.gemini2_camera.random_pitch_deg = (0.0, 0.0)
+        self.scene.gemini2_camera.update_period = self.sim.dt * self.sim.decimation * wmp_update_interval
+        self.scene.gemini2_camera.allow_missing_depth_fallback = False
+        self.sim.render_interval = self.sim.decimation * wmp_update_interval
+        self.robot.actor_obs_history_length = 5
+        self.robot.critic_obs_history_length = 1
+        self.normalization.obs_scales.ang_vel = 0.25
+        self.normalization.obs_scales.joint_pos = 1.0
+        self.normalization.obs_scales.joint_vel = 0.05
+        self.normalization.obs_scales.height_scan = 5.0
+        self.normalization.clip_actions = 6.0
+        self.reward_settings.only_positive_rewards = True
+        self.reward_settings.reward_curriculum = True
+        self.reward_settings.reward_curriculum_term = ("feet_edge",)
+        self.reward_settings.reward_curriculum_schedule = ((4000.0, 10000.0, 0.1, 1.0),)
+        self.commands.heading_command = True
+        self.commands.rel_heading_envs = 1.0
+        self.commands.rel_standing_envs = 0.0
+        self.commands.ranges.lin_vel_x = (0.0, 0.8)
+        self.commands.ranges.lin_vel_y = (0.0, 0.0)
+        self.commands.ranges.ang_vel_z = (-1.0, 1.0)
+        self.commands.ranges.heading = (0.0, 0.0)
+        self.domain_rand.events.physics_material = EventTerm(
+            func=mdp.randomize_rigid_body_material,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+                "static_friction_range": (0.5, 2.0),
+                "dynamic_friction_range": (0.5, 2.0),
+                "restitution_range": (0.0, 0.0),
+                "num_buckets": 64,
+            },
+        )
+        self.domain_rand.events.add_base_mass = EventTerm(
+            func=mdp.randomize_rigid_body_mass,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names=".*trunk.*"),
+                "mass_distribution_params": (0.0, 3.0),
+                "operation": "add",
+                "recompute_inertia": True,
+            },
+        )
+        self.domain_rand.events.add_link_mass = EventTerm(
+            func=mdp.randomize_rigid_body_mass,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names="(?!.*trunk.*).*"),
+                "mass_distribution_params": (0.8, 1.2),
+                "operation": "scale",
+                "recompute_inertia": True,
+            },
+        )
+        self.domain_rand.events.randomize_base_com = EventTerm(
+            func=mdp.randomize_rigid_body_com,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names=".*trunk.*"),
+                "com_range": {"x": (-0.05, 0.05), "y": (-0.05, 0.05), "z": (-0.05, 0.05)},
+            },
+        )
+        self.domain_rand.events.randomize_actuator_gains = EventTerm(
+            func=mdp.randomize_actuator_gains,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+                "stiffness_distribution_params": (0.8, 1.2),
+                "damping_distribution_params": (0.8, 1.2),
+                "operation": "scale",
+            },
+        )
+        self.domain_rand.events.push_robot = EventTerm(
+            func=mdp.push_by_setting_velocity,
+            mode="interval",
+            interval_range_s=(15.0, 15.0),
+            params={"velocity_range": {"x": (-1.0, 1.0), "y": (-1.0, 1.0)}},
+        )
+        self.domain_rand.action_delay.enable = True
+        self.domain_rand.action_delay.params = {
+            "max_delay": max(0, int((0.005 - 1.0e-8) / self.sim.dt) + 1),
+            "min_delay": 0,
+            "mode": "sim_step",
+        }
+        self.domain_rand.motor_strength.enable = True
+        self.domain_rand.motor_strength.range = (0.8, 1.2)
+
+
+@configclass
+class A1WMPAMPTerrainAgentCfg(A1AMPFlatAgentCfg):
+    """A1 完整 WMP-AMP 地形测试训练配置。"""
+
+    experiment_name: str = "a1_wmp_amp_terrain"
+    wandb_project: str = "a1_wmp_amp"
+    runner_class_name: str = "legged_lab.runners.wmp_amp_runner:WMPAMPRunner"
+    wmp: dict = {
+        "feature_type": "deter",
+        "update_interval": 5,
+        "train_start_steps": 10000,
+        "train_steps_per_iter": 10,
+        "batch_size": 16,
+        "batch_length": 64,
+        "replay_capacity_episodes": 50000,
+        "replay_device": "cpu",
+        "use_depth_predictor": True,
+        "camera_sample_all_envs": False,
+        "camera_num_envs": 1024,
+        "camera_env_seed": 42,
+        "camera_force_tilt_crawl": True,
+        "use_history_encoder": True,
+        "history_steps": 5,
+        "history_dim_per_step": 45,
+        "history_encoder_hidden_dims": [256, 128],
+        "history_latent_dim": 35,
+        "height_scan_dim": 187,
+        "command_start": 6,
+        "command_dim": 3,
+        "depth_predictor": {
+            "training_interval": 10,
+            "training_iters": 1000,
+            "batch_size": 1024,
+        },
+    }
+    amp: dict = {
+        "motion_files": [],
+        "canonical_obs_dim": 30,
+        "retarget_adapter": {
+            "class_path": "legged_lab.amp.retarget:A1CanonicalRetargetAdapter",
+            "profile": "a1_canonical_v1",
+            "target_joint_order": "env",
+        },
+        "num_preload_transitions": 2000000,
+        "reward_coef": 0.01,
+        "task_reward_lerp": 0.3,
+        "discriminator_hidden_dims": [1024, 512],
+        "replay_buffer_size": 1000000,
+        "preload_normalizer": True,
+        "grad_penalty_coef": 1.0,
+    }
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.policy.class_name = "legged_lab.models:WMPMLPModel"
+        self.policy.actor_hidden_dims = [256, 128, 64]
+        self.policy.critic_hidden_dims = [512, 256, 128]
+        self.algorithm.class_name = "legged_lab.algorithms.wmp_amp_ppo:WMPAMPPPO"
+        self.algorithm.entropy_coef = 0.01
+        self.algorithm.num_learning_epochs = 5
+        self.algorithm.num_mini_batches = 4
+        self.algorithm.vel_predict_coef = 1.0
+        self.algorithm.vel_target_start = 45
+        self.algorithm.vel_target_dim = 3
+        self.num_steps_per_env = 24
+        self.save_interval = 1000
+        self.obs_groups = {"actor": ["policy", "wmp"], "critic": ["critic", "wmp"]}
