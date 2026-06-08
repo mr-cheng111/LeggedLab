@@ -62,7 +62,7 @@ class A1AMPFlatEnvCfg(BaseEnvCfg):
         self.scene.terrain_type = "plane"
         self.scene.terrain_generator = None
         self.scene.height_scanner.enable_height_scan = False
-        self.scene.gemini2_camera.enable = False
+        self.scene.rgbd_camera.enable = False
         self.scene.env_spacing = 2.5
         self.robot.feet_body_names = [".*foot.*"]
         self.robot.terminate_contacts_body_names = [".*trunk.*"]
@@ -161,7 +161,7 @@ class A1WMPAMPRewardCfg(A1AMPRewardCfg):
         params={"sensor_cfg": SceneEntityCfg("contact_sensor", body_names="(?!.*foot.*).*"), "threshold": 0.1},
     )
     feet_stumble = RewTerm(
-        func=mdp.feet_stumble,
+        func=mdp.wmp_feet_stumble,
         weight=-0.1,
         params={"sensor_cfg": SceneEntityCfg("contact_sensor", body_names=[".*foot.*"])},
     )
@@ -201,36 +201,42 @@ class A1WMPAMPTerrainEnvCfg(A1AMPFlatEnvCfg):
         self.scene.terrain_type = "generator"
         self.scene.terrain_generator = WMP_MIXED_TERRAINS_CFG
         self.scene.max_init_terrain_level = 0
+        self.scene.terrain_curriculum.enabled = True
+        self.scene.terrain_curriculum.schedule = (0.0, 15000.0, 0.0, 9.0)
         self.scene.height_scanner.enable_height_scan = True
         self.scene.height_scanner.prim_body_name = "trunk"
-        self.scene.gemini2_camera.enable = True
-        self.scene.gemini2_camera.enable_rgb = False
-        self.scene.gemini2_camera.enable_depth = True
-        self.scene.gemini2_camera.partial_camera = True
-        self.scene.gemini2_camera.partial_camera_num_envs = 1024
-        self.scene.gemini2_camera.partial_camera_seed = 42
-        self.scene.gemini2_camera.partial_camera_force_tilt_crawl = True
-        self.scene.gemini2_camera.model_name = "wmp_front_depth"
-        self.scene.gemini2_camera.camera_model = "pinhole"
-        self.scene.gemini2_camera.spawn_prim_path = "trunk/wmp_depth_camera"
-        self.scene.gemini2_camera.spawn_offset_pos = (0.27, 0.0, 0.10)
-        self.scene.gemini2_camera.spawn_offset_rot = (1.0, 0.0, 0.0, 0.0)
-        self.scene.gemini2_camera.width = 64
-        self.scene.gemini2_camera.height = 64
-        self.scene.gemini2_camera.depth_near = 0.0
-        self.scene.gemini2_camera.depth_far = 2.0
-        self.scene.gemini2_camera.horizontal_fov_deg = 58.0
-        self.scene.gemini2_camera.randomize_rotation = False
-        self.scene.gemini2_camera.random_pitch_deg = (0.0, 0.0)
-        self.scene.gemini2_camera.update_period = self.sim.dt * self.sim.decimation * wmp_update_interval
-        self.scene.gemini2_camera.allow_missing_depth_fallback = False
+        self.scene.rgbd_camera.enable = True
+        self.scene.rgbd_camera.enable_rgb = False
+        self.scene.rgbd_camera.enable_depth = True
+        self.scene.rgbd_camera.partial_camera = True
+        self.scene.rgbd_camera.partial_camera_num_envs = 1024
+        self.scene.rgbd_camera.partial_camera_seed = 42
+        self.scene.rgbd_camera.partial_camera_force_tilt_crawl = True
+        self.scene.rgbd_camera.model_name = "wmp_front_depth"
+        self.scene.rgbd_camera.camera_model = "pinhole"
+        self.scene.rgbd_camera.spawn_prim_path = "trunk/rgbd_camera"
+        self.scene.rgbd_camera.spawn_offset_pos = (0.3, 0.0, 0.03)
+        self.scene.rgbd_camera.spawn_offset_rot = (1.0, 0.0, 0.0, 0.0)
+        self.scene.rgbd_camera.width = 64
+        self.scene.rgbd_camera.height = 64
+        self.scene.rgbd_camera.depth_near = 0.0
+        self.scene.rgbd_camera.depth_far = 2.0
+        self.scene.rgbd_camera.horizontal_fov_deg = 58.0
+        self.scene.rgbd_camera.randomize_rotation = True
+        self.scene.rgbd_camera.random_pitch_deg = (5.0, 15.0)
+        self.scene.rgbd_camera.update_period = self.sim.dt * self.sim.decimation * wmp_update_interval
+        self.scene.rgbd_camera.allow_missing_depth_fallback = False
         self.sim.render_interval = self.sim.decimation * wmp_update_interval
         self.robot.actor_obs_history_length = 5
         self.robot.critic_obs_history_length = 1
+        self.robot.wmp_privileged_contact_body_names = [".*thigh.*", ".*calf.*"]
         self.normalization.obs_scales.ang_vel = 0.25
         self.normalization.obs_scales.joint_pos = 1.0
         self.normalization.obs_scales.joint_vel = 0.05
         self.normalization.obs_scales.height_scan = 5.0
+        self.normalization.obs_scales.contact_force = 0.005
+        self.normalization.obs_scales.pd_gains = 5.0
+        self.normalization.obs_scales.com_pos = 20.0
         self.normalization.clip_actions = 6.0
         self.reward_settings.only_positive_rewards = True
         self.reward_settings.reward_curriculum = True
@@ -244,7 +250,7 @@ class A1WMPAMPTerrainEnvCfg(A1AMPFlatEnvCfg):
         self.commands.ranges.ang_vel_z = (-1.0, 1.0)
         self.commands.ranges.heading = (0.0, 0.0)
         self.domain_rand.events.physics_material = EventTerm(
-            func=mdp.randomize_rigid_body_material,
+            func=mdp.wmp_recording_randomize_rigid_body_material,
             mode="startup",
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
@@ -255,7 +261,7 @@ class A1WMPAMPTerrainEnvCfg(A1AMPFlatEnvCfg):
             },
         )
         self.domain_rand.events.add_base_mass = EventTerm(
-            func=mdp.randomize_rigid_body_mass,
+            func=mdp.wmp_recording_randomize_rigid_body_mass,
             mode="startup",
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names=".*trunk.*"),
@@ -275,7 +281,7 @@ class A1WMPAMPTerrainEnvCfg(A1AMPFlatEnvCfg):
             },
         )
         self.domain_rand.events.randomize_base_com = EventTerm(
-            func=mdp.randomize_rigid_body_com,
+            func=mdp.wmp_recording_randomize_rigid_body_com,
             mode="startup",
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names=".*trunk.*"),
@@ -283,7 +289,7 @@ class A1WMPAMPTerrainEnvCfg(A1AMPFlatEnvCfg):
             },
         )
         self.domain_rand.events.randomize_actuator_gains = EventTerm(
-            func=mdp.randomize_actuator_gains,
+            func=mdp.wmp_recording_randomize_actuator_gains,
             mode="startup",
             params={
                 "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
@@ -322,6 +328,7 @@ class A1WMPAMPTerrainAgentCfg(A1AMPFlatAgentCfg):
         "train_steps_per_iter": 10,
         "batch_size": 16,
         "batch_length": 64,
+        "model_lr": 1.0e-4,
         "replay_capacity_episodes": 50000,
         "replay_device": "cpu",
         "use_depth_predictor": True,
@@ -366,11 +373,15 @@ class A1WMPAMPTerrainAgentCfg(A1AMPFlatAgentCfg):
         self.policy.actor_hidden_dims = [256, 128, 64]
         self.policy.critic_hidden_dims = [512, 256, 128]
         self.algorithm.class_name = "legged_lab.algorithms.wmp_amp_ppo:WMPAMPPPO"
+        self.algorithm.learning_rate = 3.0e-4
+        self.algorithm.schedule = "fixed"
+        self.algorithm.desired_kl = 0.006
         self.algorithm.entropy_coef = 0.01
         self.algorithm.num_learning_epochs = 5
         self.algorithm.num_mini_batches = 4
+        self.algorithm.normalize_advantage_per_mini_batch = True
         self.algorithm.vel_predict_coef = 1.0
-        self.algorithm.vel_target_start = 45
+        self.algorithm.vel_target_start = 50
         self.algorithm.vel_target_dim = 3
         self.num_steps_per_env = 24
         self.save_interval = 1000

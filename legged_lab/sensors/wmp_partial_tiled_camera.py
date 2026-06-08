@@ -27,48 +27,142 @@ def select_wmp_camera_env_ids(
     camera_num_envs: int | None = 1024,
     seed: int = 42,
     terrain_generator=None,
+    terrain_types: torch.Tensor | None = None,
+    terrain_cols_by_kind: dict[str, tuple[int, ...]] | None = None,
     force_tilt_crawl: bool = True,
     device: str | torch.device = "cpu",
 ) -> torch.Tensor:
     """选择 WMP 真实相机环境。
 
     对齐原版公式：
-        depth_index = sample(non_tilt_crawl) U range(tilt_start_idx, crawl_end_idx)
-    在 IsaacLab 中 terrain type 由 env index 按列分配，因此先由 terrain
-    proportions 还原每列的地形类型，再强制加入 tilt/crawl 列对应的 env。
+        depth_index = sample(non_tilt_crawl) + all_tilt_crawl
     """
+    _, depth_index, _ = select_wmp_depth_indices(
+        num_envs=num_envs,
+        camera_num_envs=camera_num_envs,
+        seed=seed,
+        terrain_generator=terrain_generator,
+        terrain_types=terrain_types,
+        terrain_cols_by_kind=terrain_cols_by_kind,
+        force_tilt_crawl=force_tilt_crawl,
+        device=device,
+    )
+    return depth_index
+
+
+def select_wmp_depth_indices(
+    num_envs: int,
+    camera_num_envs: int | None = 1024,
+    seed: int = 42,
+    terrain_generator=None,
+    terrain_types: torch.Tensor | None = None,
+    terrain_cols_by_kind: dict[str, tuple[int, ...]] | None = None,
+    force_tilt_crawl: bool = True,
+    device: str | torch.device = "cpu",
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """生成原版 WMP 三元 depth index。"""
     device = torch.device(device)
+    inverse = torch.full((max(int(num_envs), 0),), -1, device=device, dtype=torch.long)
     if num_envs <= 0:
-        return torch.empty(0, device=device, dtype=torch.long)
+        empty = torch.empty(0, device=device, dtype=torch.long)
+        return empty, empty, inverse
     if camera_num_envs is None:
         camera_num_envs = 1024
     camera_num_envs = min(int(camera_num_envs), int(num_envs))
-    if camera_num_envs <= 0:
-        return torch.empty(0, device=device, dtype=torch.long)
+    camera_num_envs = max(camera_num_envs, 0)
 
-    forced = _tilt_crawl_env_ids(num_envs, terrain_generator, force_tilt_crawl, device)
+    forced = _tilt_crawl_env_ids(
+        num_envs,
+        terrain_generator,
+        force_tilt_crawl,
+        device,
+        terrain_types=terrain_types,
+        terrain_cols_by_kind=terrain_cols_by_kind,
+    )
+    forced = _ordered_unique_valid(forced, num_envs, device)
+    if forced.numel() > camera_num_envs:
+        print(
+            "[WARN] WMP depth_index expands camera_num_envs to include all tilt/crawl envs: "
+            f"requested={camera_num_envs}, tilt_crawl={int(forced.numel())}"
+        )
+        camera_num_envs = int(forced.numel())
     remaining = camera_num_envs - int(forced.numel())
-    if remaining <= 0:
-        return forced[:camera_num_envs].unique(sorted=True)
 
-    pool_mask = torch.ones(num_envs, device=device, dtype=torch.bool)
-    if forced.numel() > 0:
-        pool_mask[forced] = False
-    pool = pool_mask.nonzero(as_tuple=False).flatten()
-    if pool.numel() <= remaining:
+    pool = _depth_index_without_tilt_crawl_pool(
+        num_envs,
+        device,
+        terrain_types=terrain_types,
+        terrain_cols_by_kind=terrain_cols_by_kind,
+        forced=forced,
+    )
+    if remaining <= 0:
+        sampled = torch.empty(0, device=device, dtype=torch.long)
+    elif pool.numel() <= remaining:
         sampled = pool
     else:
         generator = torch.Generator(device="cpu")
         generator.manual_seed(int(seed))
         perm = torch.randperm(pool.numel(), generator=generator, device="cpu")[:remaining].to(device)
         sampled = pool[perm]
-    return torch.cat((forced, sampled), dim=0).unique(sorted=True)
+    depth_index_without_crawl_tilt = torch.sort(_ordered_unique_valid(sampled, num_envs, device)).values
+    forced = torch.sort(forced).values
+    depth_index = torch.cat((depth_index_without_crawl_tilt, forced), dim=0)
+    inverse[depth_index] = torch.arange(depth_index.numel(), device=device, dtype=torch.long)
+    return depth_index_without_crawl_tilt, depth_index, inverse
 
 
-def _tilt_crawl_env_ids(num_envs: int, terrain_generator, force_tilt_crawl: bool, device: torch.device) -> torch.Tensor:
-    if not force_tilt_crawl or terrain_generator is None or len(terrain_generator.sub_terrains) <= 1:
+def _ordered_unique_valid(ids: torch.Tensor, num_envs: int, device: torch.device) -> torch.Tensor:
+    ids = torch.as_tensor(ids, device=device, dtype=torch.long).flatten()
+    if ids.numel() == 0:
+        return ids
+    keep = torch.zeros(num_envs, device=device, dtype=torch.bool)
+    out = []
+    for env_id in ids.tolist():
+        if 0 <= int(env_id) < num_envs and not bool(keep[int(env_id)].item()):
+            keep[int(env_id)] = True
+            out.append(int(env_id))
+    return torch.tensor(out, device=device, dtype=torch.long)
+
+
+def _depth_index_without_tilt_crawl_pool(
+    num_envs: int,
+    device: torch.device,
+    terrain_types: torch.Tensor | None,
+    terrain_cols_by_kind: dict[str, tuple[int, ...]] | None,
+    forced: torch.Tensor,
+) -> torch.Tensor:
+    cols_by_kind = terrain_cols_by_kind or {}
+    forced_cols = list(cols_by_kind.get("tilt", ())) + list(cols_by_kind.get("crawl", ()))
+    if forced_cols and terrain_types is not None:
+        terrain_types = torch.as_tensor(terrain_types, device=device)
+        # 原版从 tilt_start_idx 之前采样，因此 rough_flat 等 crawl 后方地形不进入随机相机池。
+        return (terrain_types < min(forced_cols)).nonzero(as_tuple=False).flatten()
+    pool_mask = torch.ones(num_envs, device=device, dtype=torch.bool)
+    if forced.numel() > 0:
+        pool_mask[forced] = False
+    return pool_mask.nonzero(as_tuple=False).flatten()
+
+
+def _tilt_crawl_env_ids(
+    num_envs: int,
+    terrain_generator,
+    force_tilt_crawl: bool,
+    device: torch.device,
+    terrain_types: torch.Tensor | None = None,
+    terrain_cols_by_kind: dict[str, tuple[int, ...]] | None = None,
+) -> torch.Tensor:
+    if not force_tilt_crawl:
         return torch.empty(0, device=device, dtype=torch.long)
 
+    cols_by_kind = terrain_cols_by_kind or {}
+    forced_cols = list(cols_by_kind.get("tilt", ())) + list(cols_by_kind.get("crawl", ()))
+    if forced_cols and terrain_types is not None:
+        terrain_types = torch.as_tensor(terrain_types, device=device)
+        col_tensor = torch.tensor(forced_cols, device=device, dtype=terrain_types.dtype)
+        return torch.isin(terrain_types, col_tensor).nonzero(as_tuple=False).flatten()
+
+    if terrain_generator is None or len(terrain_generator.sub_terrains) <= 1:
+        return torch.empty(0, device=device, dtype=torch.long)
     keys = list(terrain_generator.sub_terrains.keys())
     forced_kind_ids = [idx for idx, key in enumerate(keys) if key.removeprefix("wmp_") in ("tilt", "crawl")]
     if not forced_kind_ids:
@@ -96,7 +190,7 @@ class WMPPartialTiledCameraCfg(TiledCameraCfg):
 
     full_num_envs: int = 0
     camera_env_ids: tuple[int, ...] = ()
-    camera_model_name: str = "gemini2"
+    camera_model_name: str = "RGBD_camera"
 
 
 class WMPPartialTiledCamera(TiledCamera):
@@ -113,7 +207,8 @@ class WMPPartialTiledCamera(TiledCamera):
         camera_ids = torch.as_tensor(cfg.camera_env_ids, dtype=torch.long)
         if camera_ids.numel() == 0:
             raise ValueError("WMPPartialTiledCamera requires at least one camera env id.")
-        self.camera_env_ids = camera_ids.unique(sorted=True)
+        ordered_num_envs = int(cfg.full_num_envs or int(camera_ids.max().item()) + 1)
+        self.camera_env_ids = _ordered_unique_valid(camera_ids, ordered_num_envs, torch.device("cpu"))
         full_num_envs = int(cfg.full_num_envs or (int(self.camera_env_ids.max().item()) + 1))
         self.full_num_envs = full_num_envs
         self.camera_env_mask = torch.zeros(full_num_envs, dtype=torch.bool)
@@ -138,11 +233,14 @@ class WMPPartialTiledCamera(TiledCamera):
             if match is not None:
                 actual_env_ids.append(int(match.group(1)))
         if len(actual_env_ids) == self._view.count:
-            self.camera_env_ids = torch.tensor(actual_env_ids, dtype=torch.long)
-            self.camera_env_mask = torch.zeros(self.full_num_envs, dtype=torch.bool)
-            self.camera_env_mask[self.camera_env_ids] = True
-            self.camera_env_id_inverse = torch.full((self.full_num_envs,), -1, dtype=torch.long)
-            self.camera_env_id_inverse[self.camera_env_ids] = torch.arange(self.camera_env_ids.numel(), dtype=torch.long)
+            actual = torch.tensor(actual_env_ids, dtype=torch.long)
+            if actual.numel() != self.camera_env_ids.numel() or not torch.equal(actual, self.camera_env_ids):
+                requested_head = self.camera_env_ids[:16].tolist()
+                actual_head = actual[:16].tolist()
+                raise RuntimeError(
+                    "WMPPartialTiledCamera image slot order must match depth_index exactly. "
+                    f"requested_head={requested_head}, actual_head={actual_head}"
+                )
 
     def _spawn_partial_cameras_from_cfg(self, cfg: WMPPartialTiledCameraCfg, spawn_cfg):
         stage = get_current_stage()
