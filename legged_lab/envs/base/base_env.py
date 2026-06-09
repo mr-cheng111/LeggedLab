@@ -332,8 +332,6 @@ class BaseEnv(VecEnv):
             self.action_buffer.set_time_lag(time_lags, torch.arange(self.num_envs, device=self.device))
         self.last_processed_actions = self.robot.data.default_joint_pos.clone()
         self.motor_strength = torch.ones(self.num_envs, self.num_actions, device=self.device)
-        if self.cfg.domain_rand.motor_strength.enable:
-            self._randomize_motor_strength(torch.arange(self.num_envs, device=self.device))
 
         self.robot_cfg = SceneEntityCfg(name="robot")
         self.robot_cfg.resolve(self.scene)
@@ -452,8 +450,6 @@ class BaseEnv(VecEnv):
         self.actor_obs_buffer.reset(env_ids)
         self.critic_obs_buffer.reset(env_ids)
         self.action_buffer.reset(env_ids)
-        if self.cfg.domain_rand.motor_strength.enable:
-            self._randomize_motor_strength(env_ids)
         if hasattr(self, "last_push_step_buf"):
             self.last_push_step_buf[env_ids] = -1
         if hasattr(self, "push_recovered_buf"):
@@ -468,8 +464,6 @@ class BaseEnv(VecEnv):
         delayed_actions = self.action_buffer.compute(actions)
 
         cliped_actions = torch.clip(delayed_actions, -self.clip_actions, self.clip_actions).to(self.device)
-        if self.cfg.domain_rand.motor_strength.enable:
-            cliped_actions = cliped_actions * self.motor_strength
         processed_actions = cliped_actions * self.action_scale + self.robot.data.default_joint_pos
         latency_steps = 0
         if self.cfg.domain_rand.action_delay.enable and self.action_delay_mode == "sim_step":
@@ -488,6 +482,8 @@ class BaseEnv(VecEnv):
             action_target = self.last_processed_actions if substep < latency_steps else processed_actions
             self.robot.set_joint_position_target(action_target)
             self.scene.write_data_to_sim()
+            if self.cfg.domain_rand.motor_strength.enable:
+                self._apply_motor_strength_to_torque()
             self.sim.step(render=False)
             if self.sim_step_counter % self.render_interval == 0 and is_rendering:
                 self.sim.render()
@@ -1017,16 +1013,25 @@ class BaseEnv(VecEnv):
             reward_buf = torch.clip(reward_buf, min=0.0)
         return reward_buf
 
-    def _randomize_motor_strength(self, env_ids: torch.Tensor):
-        if len(env_ids) == 0:
-            return
+    def _apply_motor_strength_to_torque(self):
         low, high = self.cfg.domain_rand.motor_strength.range
+        effort_target = getattr(self.robot, "_joint_effort_target_sim", None)
+        all_indices = getattr(self.robot, "_ALL_INDICES", None)
+        if effort_target is None or all_indices is None:
+            raise RuntimeError("WMP motor_strength requires IsaacLab Articulation torque buffers.")
+        if self.motor_strength.shape != effort_target.shape:
+            self.motor_strength = torch.ones_like(effort_target)
+
         if abs(float(high) - float(low)) < 1.0e-8:
-            self.motor_strength[env_ids] = float(low)
-            return
-        self.motor_strength[env_ids] = torch.empty(
-            len(env_ids), self.num_actions, device=self.device
-        ).uniform_(float(low), float(high))
+            self.motor_strength.fill_(float(low))
+        else:
+            self.motor_strength.uniform_(float(low), float(high))
+
+        # 原版 WMP 在 _compute_torques() 完成 torque clip 后执行 tau_final = s * tau。
+        # 这里等待 IsaacLab actuator 生成 _joint_effort_target_sim 后再乘 s，并在 sim.step 前覆盖 PhysX force。
+        effort_target.mul_(self.motor_strength)
+        self.robot.data.applied_torque[:] = effort_target
+        self.robot.root_physx_view.set_dof_actuation_forces(effort_target, all_indices)
 
     def get_observations(self):
         actor_obs, critic_obs = self.compute_observations()

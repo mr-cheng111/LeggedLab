@@ -869,8 +869,8 @@ critic 维度已经对齐，下一步不是改维度，而是验收字段语义:
   - 如果真实 depth 更新频率或 has_real_depth 标记异常，DepthPredictor 监督样本数会下降。
 
 
-12.7 Domain randomization 内部自洽已补齐，但最终物理效果不能保证完全一致
------------------------------------------------------------------------
+12.7 Domain randomization 内部自洽已补齐，motor_strength 已改为 torque-level
+------------------------------------------------------------------------
 原版:
   - friction/restitution 在 env 创建时为每个 env 采样标量，并写入该 env 的 rigid shapes。
   - base mass、link mass、COM 在 IsaacGym 创建 env 时随机。
@@ -889,16 +889,21 @@ critic 维度已经对齐，下一步不是改维度，而是验收字段语义:
   - recording material EventTerm 按 env 采样 friction/restitution 标量并写入所有相关 shapes，critic 读取同一采样值，不再依赖独立 fallback sample。
   - recording COM EventTerm 记录量为 new_com - default_com；critic 中再乘 obs_scales.com_pos，语义对应原版 randomized_com_pos * obs_scales.com_pos。
   - recording gains EventTerm 记录量为 randomized_gain / default_gain - 1；critic 中再乘 obs_scales.pd_gains，语义对应原版。
+  - motor_strength 不再乘 action/position target；现在每个 physics substep 在 IsaacLab actuator 生成 torque 后采样 s，
+    执行 tau_final = s * tau，并在 sim.step 前覆盖 PhysX dof actuation force。这个插入位置与原版
+    _compute_torques() 后、set_dof_actuation_force_tensor() 前的语义一致。
 
 仍不等价:
-  - motor_strength 仍在 reset 时采样，并作用于 action target/position target；原版是在每个 sim substep 对已经算出的 torque 重新采样乘法系数。
   - action_delay 当前 sim_step 模式会在 substep 级选择 last_processed_actions 或当前 processed_actions；原版是在 torque 计算入口选择 last_actions 或 actions。
-  - IsaacLab/PhysX 与原版 IsaacGym 的材质、质量、COM、显式 actuator 计算路径不同；即使同一范围和同一记录量，也不能保证完全相同的接触/力矩轨迹。
+  - motor_strength hook 依赖 IsaacLab Articulation 的 torque buffer；A1 WMP 使用显式 DCMotor 路径时语义接近原版，
+    但这不是 IsaacLab 公开跨 actuator 的通用接口。
+  - IsaacLab/PhysX 与原版 IsaacGym 的材质、质量、COM、显式 actuator 计算路径不同；即使同一范围、同一记录量和同一 torque-level s，
+    也不能保证完全相同的接触/力矩轨迹。
 
 结论:
   当前可以保证 domain randomization 的 critic 输入与本项目实际 EventTerm 随机量内部自洽；
-  不能保证最终训练效果与原版 WMP 完全一致。若要进一步逼近，优先项是实现 torque-level、
-  per-substep 的 motor_strength hook，并对 action latency 在 torque 入口处做等价延迟。
+  motor_strength 的插入位置与每 substep 重采样频率已按原版主要语义对齐。整体仍不能保证最终训练效果
+  与原版 WMP 完全一致，剩余优先项是 action latency 的 torque 入口等价延迟和 IsaacGym/IsaacLab backend 差异验收。
 
 
 12.8 Reward / command 基本对齐，但仍需跑统计
