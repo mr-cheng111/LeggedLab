@@ -297,7 +297,7 @@ class A1WMPAMPTerrainEnvCfg(A1AMPFlatEnvCfg):
         )
         self.domain_rand.events.randomize_actuator_gains = EventTerm(
             func=mdp.wmp_recording_randomize_actuator_gains,
-            mode="startup",
+            mode="reset",
             params={
                 "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
                 "stiffness_distribution_params": (0.8, 1.2),

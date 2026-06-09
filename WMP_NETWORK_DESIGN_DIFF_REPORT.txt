@@ -869,20 +869,36 @@ critic 维度已经对齐，下一步不是改维度，而是验收字段语义:
   - 如果真实 depth 更新频率或 has_real_depth 标记异常，DepthPredictor 监督样本数会下降。
 
 
-12.7 Domain randomization 数值来源接近，但执行时机不同
-------------------------------------------------------
+12.7 Domain randomization 内部自洽已补齐，但最终物理效果不能保证完全一致
+-----------------------------------------------------------------------
 原版:
-  - friction/restitution/base mass/link mass/COM/gains 在 IsaacGym 创建 env 或 reset callback 中随机。
-  - motor_strength 在每个 sim substep 对 torque 乘随机系数。
-  - action_latency 每次 step 随机整数延迟。
+  - friction/restitution 在 env 创建时为每个 env 采样标量，并写入该 env 的 rigid shapes。
+  - base mass、link mass、COM 在 IsaacGym 创建 env 时随机。
+  - gains 在每次 reset 中重新采样 randomized_p_gains/randomized_d_gains。
+  - motor_strength 在每个 sim substep 对最终 torque 乘随机系数。
+  - action_latency 每次 step 随机整数延迟；延迟时使用 last_actions 重新计算 torque。
 
-当前:
-  - friction/restitution/base mass/COM/gains 使用 IsaacLab EventTerm 或记录型 EventTerm。
-  - motor_strength 在 reset 时采样，并作用于 action target。
-  - action_delay 使用 IsaacLab DelayBuffer / sim_step 语义。
+当前已修订:
+  - 新增 legged_lab.mdp.wmp_recording_* EventTerm，friction/restitution/base mass/COM/gains 的采样值会同时写入物理仿真和 WMP critic privileged buffer。
+  - A1 WMP 的数值范围已与原版主要配置对齐:
+      friction [0.5, 2.0]，restitution [0.0, 0.0]，
+      base added mass [0.0, 3.0]，link mass scale [0.8, 1.2]，
+      COM xyz [-0.05, 0.05]，PD gains scale [0.8, 1.2]，
+      motor_strength [0.8, 1.2]，latency 0 到约 0.005s，push interval 15s/max xy vel 1.0。
+  - gains EventTerm 已从 startup 改为 reset，和原版每个 episode reset 重采 gains 的语义一致。
+  - recording material EventTerm 按 env 采样 friction/restitution 标量并写入所有相关 shapes，critic 读取同一采样值，不再依赖独立 fallback sample。
+  - recording COM EventTerm 记录量为 new_com - default_com；critic 中再乘 obs_scales.com_pos，语义对应原版 randomized_com_pos * obs_scales.com_pos。
+  - recording gains EventTerm 记录量为 randomized_gain / default_gain - 1；critic 中再乘 obs_scales.pd_gains，语义对应原版。
 
-影响:
-  critic privileged buffer 已尽量记录对应随机量，但物理执行时机、作用位置和随机重采样频率仍不等价。
+仍不等价:
+  - motor_strength 仍在 reset 时采样，并作用于 action target/position target；原版是在每个 sim substep 对已经算出的 torque 重新采样乘法系数。
+  - action_delay 当前 sim_step 模式会在 substep 级选择 last_processed_actions 或当前 processed_actions；原版是在 torque 计算入口选择 last_actions 或 actions。
+  - IsaacLab/PhysX 与原版 IsaacGym 的材质、质量、COM、显式 actuator 计算路径不同；即使同一范围和同一记录量，也不能保证完全相同的接触/力矩轨迹。
+
+结论:
+  当前可以保证 domain randomization 的 critic 输入与本项目实际 EventTerm 随机量内部自洽；
+  不能保证最终训练效果与原版 WMP 完全一致。若要进一步逼近，优先项是实现 torque-level、
+  per-substep 的 motor_strength hook，并对 action latency 在 torque 入口处做等价延迟。
 
 
 12.8 Reward / command 基本对齐，但仍需跑统计
