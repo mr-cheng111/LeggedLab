@@ -230,6 +230,13 @@ class A1WMPAMPTerrainEnvCfg(A1AMPFlatEnvCfg):
         self.robot.actor_obs_history_length = 5
         self.robot.critic_obs_history_length = 1
         self.robot.wmp_privileged_contact_body_names = [".*thigh.*", ".*calf.*"]
+        self.robot.wmp_time_out_strictly_greater = True
+        self.robot.terminate_on_wmp_velocity_violation = True
+        self.robot.wmp_velocity_violation_threshold = 1.5
+        self.robot.wmp_velocity_violation_min_terrain_level = 4
+        self.robot.terminate_on_wmp_fall = True
+        self.robot.wmp_fall_z_velocity_threshold = -3.0
+        self.robot.wmp_fall_projected_gravity_z_threshold = 0.0
         self.normalization.obs_scales.ang_vel = 0.25
         self.normalization.obs_scales.joint_pos = 1.0
         self.normalization.obs_scales.joint_vel = 0.05
@@ -365,6 +372,7 @@ class A1WMPAMPTerrainAgentCfg(A1AMPFlatAgentCfg):
         "replay_buffer_size": 1000000,
         "preload_normalizer": True,
         "grad_penalty_coef": 1.0,
+        "min_normalized_std": [0.05, 0.02, 0.05] * 4,
     }
 
     def __post_init__(self):
@@ -379,7 +387,7 @@ class A1WMPAMPTerrainAgentCfg(A1AMPFlatAgentCfg):
         self.algorithm.entropy_coef = 0.01
         self.algorithm.num_learning_epochs = 5
         self.algorithm.num_mini_batches = 4
-        self.algorithm.normalize_advantage_per_mini_batch = True
+        self.algorithm.normalize_advantage_per_mini_batch = False
         self.algorithm.vel_predict_coef = 1.0
         self.algorithm.vel_target_start = 50
         self.algorithm.vel_target_dim = 3

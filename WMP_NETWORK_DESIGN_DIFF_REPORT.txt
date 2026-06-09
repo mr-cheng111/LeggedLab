@@ -551,7 +551,7 @@ reward 公式:
   entropy_coef=0.01
   num_learning_epochs=5
   num_mini_batches=4
-  normalize_advantage_per_mini_batch=True
+  normalize_advantage_per_mini_batch=False
   vel_predict_coef=1.0
   num_steps_per_env=24
 
@@ -648,7 +648,6 @@ critic 维度已经对齐，下一步不是改维度，而是验收字段语义:
 建议做:
   - actor obs_normalization 开关实验。
   - critic obs_normalization 开关实验。
-  - normalize_advantage_per_mini_batch 开关实验。
   - desired_kl/schedule 与原版配置对照实验。
 
 
@@ -676,3 +675,231 @@ critic 维度已经对齐，下一步不是改维度，而是验收字段语义:
   IsaacLab 与 IsaacGym 的仿真和传感器差异；
   AMP retarget 后 expert 数据分布；
   rsl_rl v5 PPO/storage/normalization 更新接口差异。
+
+
+12. 2026-06-09 复查新增的剩余差异
+=================================
+
+本节是在前述 shape/语义修复之后，继续对比原版 WMP 当前仍存在的差异。
+结论先行:
+  网络主干和关键输入维度已经不是主要差异；
+  剩余差异主要集中在训练循环、PPO/AMP 优化接口、terrain/camera 实现和 replay 采样细节；
+  A1 WMP 专用 reset/termination 语义已在本轮对齐，接触传感器实现仍保留 IsaacLab 框架差异。
+
+
+12.1 PPO / AMP optimizer 仍不同
+-------------------------------
+原版 AMPPPO:
+  - actor_critic 和 discriminator 由同一个 Adam optimizer 管理。
+  - optimizer param groups:
+      actor_critic
+      amp_trunk(weight_decay=10e-4)
+      amp_head(weight_decay=10e-2)
+  - 每次 update 后只对 actor_critic.parameters() 做 grad clip。
+  - 若 min_normalized_std 存在，会对 actor_critic.std 做下限 clamp。
+
+当前 WMPAMPPPO:
+  - 继承 rsl_rl v5 PPO，actor 和 critic 是两个模型对象。
+  - discriminator 通过 add_param_group 挂到 rsl_rl v5 optimizer。
+  - update 时分别 clip actor.parameters() 与 critic.parameters()。
+  - 已复刻原版 min_normalized_std clamp:
+      A1 配置为 [0.05, 0.02, 0.05] * 4；
+      WMPAMPRunner 使用 IsaacLab joint soft limits 计算
+      min_std = min_normalized_std * (upper_limit - lower_limit)；
+      WMPAMPPPO 在 optimizer.step() 后 clamp GaussianDistribution 的 std 参数。
+
+影响:
+  即使 loss 公式接近，优化器参数组织、grad clip 范围和 rsl_rl v5 storage/update 细节仍会改变 PPO 轨迹。
+
+
+12.2 Advantage / return / timeout 已按原版语义对齐
+--------------------------------------------------
+原版:
+  - AMPPPO.process_env_step() 会处理 infos["time_outs"] bootstrap:
+      reward += gamma * value * time_out
+  - storage.compute_returns() 在整段 rollout 上计算 GAE。
+  - advantages 在 compute_returns() 后按全 rollout 做一次标准化。
+
+当前:
+  - BaseEnv.step() 每步写入 extras["time_outs"] = self.time_out_buf。
+  - WMPAMPPPO.process_env_step() 调用 rsl_rl v5 PPO.process_env_step()，父类已经执行 timeout bootstrap。
+  - WMPAMPPPO 不再覆盖 compute_returns()，直接使用 rsl_rl v5 PPO.compute_returns()。
+  - A1 WMP 配置已设 normalize_advantage_per_mini_batch=False，因此 advantages 按全 rollout 标准化。
+
+影响:
+  timeout bootstrap、GAE 公式和 advantage 标准化位置已经与原版语义对齐。
+  剩余差异仅来自 rsl_rl v5 storage/TensorDict 的实现细节，而不是算法公式差异。
+
+
+12.3 Reset / termination 已按原版 WMP A1 语义对齐
+-------------------------------------------------
+原版 LeggedRobot.check_termination():
+  - base 触地终止:
+      reset_contact = any(norm(contact_forces[:, termination_contact_indices, :]) > 1)
+  - time_out 终止:
+      time_out_buf = episode_length_buf > max_episode_length
+  - vel_violate 终止:
+      vel_error = base_lin_vel[:, 0] - commands[:, 0]
+      vel_violate =
+        ((vel_error > 1.5) & (commands[:, 0] < 0)) |
+        ((vel_error < -1.5) & (commands[:, 0] > 0))
+      vel_violate &= terrain_levels > 3
+  - fall 终止:
+      fall = (root_states[:, 9] < -3) | (projected_gravity[:, 2] > 0)
+  - reset_buf = reset_contact | time_out_buf | vel_violate | fall。
+
+当前 A1 WMP BaseEnv.check_reset():
+  - base 触地终止:
+      terminate_contacts_body_names = [".*trunk.*"]，阈值仍为 > 1。
+      当前使用 IsaacLab ContactSensor 的 net_forces_w_history 历史窗口取 max；
+      原版使用 IsaacGym 当前步 contact_forces。这是保留的框架层实现差异。
+  - time_out 终止:
+      A1 WMP 设置 wmp_time_out_strictly_greater=True，
+      因此使用 episode_length_buf > max_episode_length，与原版一致。
+      其他任务默认仍保持原来的 >= 语义，避免扩大行为变更。
+  - vel_violate 终止:
+      terminate_on_wmp_velocity_violation=True，仅 A1 WMP 开启。
+      vel_error = robot.data.root_lin_vel_b[:, 0] - command_generator.command[:, 0]
+      阈值 wmp_velocity_violation_threshold = 1.5。
+      wmp_velocity_violation_min_terrain_level = 4，因此条件等价 terrain_levels > 3。
+      若当前环境没有 terrain_levels，则 vel_violate 保持 False，避免平地任务误触发。
+  - fall 终止:
+      terminate_on_wmp_fall=True，仅 A1 WMP 开启。
+      robot.data.root_lin_vel_w[:, 2] < -3.0 对齐原版 root_states[:, 9] < -3。
+      robot.data.projected_gravity_b[:, 2] > 0.0 对齐原版 projected_gravity[:, 2] > 0。
+  - reset cause 日志:
+      extras["log"]["wmp_vel_violate"] 记录本步速度违例比例。
+      extras["log"]["wmp_fall"] 记录本步 fall 比例。
+
+影响:
+  A1 WMP 的 episode 长度分布、AMP terminal state、timeout bootstrap 标志和 terrain curriculum reset 入口，
+  已按原版 WMP A1 的主要 reset 公式对齐。
+
+残余差异:
+  - 接触终止的数据源仍是 IsaacLab ContactSensor 的历史窗口，而不是 IsaacGym 当前步 contact_forces。
+    这可能让 trunk 短暂接触的 reset 更保守/更敏感，后续可通过 reset cause 统计决定是否再增加
+    WMP 专用 current-force 路径。
+  - reset 后随机化、scene.reset 和 command reset 的内部执行顺序仍遵循当前 IsaacLab BaseEnv，
+    不是 legged_gym reset_idx 的逐行迁移。
+
+
+12.4 Camera pose / pitch 已人工审核通过
+--------------------------------------
+原版 A1 WMP depth:
+  - camera position = [0.27, 0, 0.03]
+  - y_angle = [-5, 5]，注释为 positive pitch down
+  - horizontal_fov = 58
+  - near/far = 0/2
+  - buffer_len = 2
+
+当前 A1 WMP:
+  - spawn_offset_pos = (0.3, 0.0, 0.03)
+  - random_pitch_deg = (5.0, 15.0)
+  - horizontal_fov_deg = 58.0
+  - depth_near/depth_far = 0/2
+  - WMP depth buffer len = 2
+
+已对齐:
+  - FOV、near/far、buffer_len、depth_buffer[:, -2] 语义已经接近。
+
+结论:
+  - 用户已人工审核当前 camera 外参和 pitch 设置，确认无需继续修订。
+  - 因此 camera pose / pitch 不再列为当前 WMP diff 的优先待办。
+  - 后续只需在真实 depth 分布异常时，再回到相机图像统计和可视化检查。
+
+
+12.5 World model replay 采样仍不是逐行等价
+------------------------------------------
+原版 train_world_model():
+  - p = wm_dataset_size / sum(wm_dataset_size) 按 env episode 长度加权采样 env。
+  - batch_length = min(sampled_env_dataset_size.min(), config.batch_length)。
+  - 对每个 env 采样 end_idx，再取 [end_idx-batch_length, end_idx)。
+  - 非真实相机 env 的 image 在 sample 时即时由 DepthPredictor(forward_height_map, prop) 生成。
+  - is_first 每个 batch 第一帧置 1。
+
+当前 WMPFixedEpisodeReplayBuffer:
+  - 也按 dataset_size 加权采样 env，并把 batch 第一帧 is_first 置 1。
+  - 但 replay 存储、episode finish、image 缺失标记、depth_index_slot 和 sample_real_depth 的实现不是原版逐行迁移。
+  - 当前 train_start_steps 使用 replay.num_steps；原版使用 sum_wm_dataset_size。
+
+影响:
+  当前方向是语义接近，但仍应把 world model loss 曲线差异优先归因到 replay/tick/sample 细节，而不是 RSSM 网络结构。
+
+
+12.6 DepthPredictor 监督采样仍有细节差异
+----------------------------------------
+原版 train_depth_predictor():
+  - batch_idx 从 env.depth_index_without_crawl_tilt 采样。
+  - time_index 对每个 env 从 [0, wm_dataset_size[idx]] 采样。
+  - image 使用 env.depth_index_inverse[batch_idx] 映射到真实相机 image buffer。
+
+当前:
+  - sample_real_depth() 从 camera_env_ids 中 dataset_size > 0 的 env 采样。
+  - 是否严格排除 tilt/crawl 取决于 camera_env_ids、depth_index_without_crawl_tilt 和 has_real_depth 的联动。
+
+风险:
+  如果 tilt/crawl env 进入 DepthPredictor 监督采样，训练分布会比原版更难；
+  如果 time_index 边界和原版不同，也会改变 early episode 的监督样本。
+
+
+12.7 Domain randomization 数值来源接近，但执行时机不同
+------------------------------------------------------
+原版:
+  - friction/restitution/base mass/link mass/COM/gains 在 IsaacGym 创建 env 或 reset callback 中随机。
+  - motor_strength 在每个 sim substep 对 torque 乘随机系数。
+  - action_latency 每次 step 随机整数延迟。
+
+当前:
+  - friction/restitution/base mass/COM/gains 使用 IsaacLab EventTerm 或记录型 EventTerm。
+  - motor_strength 在 reset 时采样，并作用于 action target。
+  - action_delay 使用 IsaacLab DelayBuffer / sim_step 语义。
+
+影响:
+  critic privileged buffer 已尽量记录对应随机量，但物理执行时机、作用位置和随机重采样频率仍不等价。
+
+
+12.8 Reward / command 基本对齐，但仍需跑统计
+-------------------------------------------
+已对齐点:
+  - command x/y/yaw/heading 范围与原版 A1 WMP 接近。
+  - reward curriculum: feet_edge 从 0.1 到 1.0，区间 4000 到 10000。
+  - tracking_lin_vel、tracking_ang_vel、feet_edge、dof_error 等主要权重在 A1WMPAMPRewardCfg 中接近原版。
+
+仍需关注:
+  - IsaacLab reward 函数实现不是 legged_gym 原函数逐行拷贝。
+  - feet_edge 使用当前 terrain edge query；原版使用 legged_gym terrain 数据结构。
+  - command generator、heading control 和 terrain curriculum 的时序来自 IsaacLab 当前实现。
+
+
+12.9 保存/恢复 checkpoint 格式不同
+----------------------------------
+原版 WMP runner save():
+  - model_state_dict
+  - optimizer_state_dict
+  - world_model_dict
+  - wm_optimizer_state_dict
+  - depth_predictor
+  - iter
+
+当前 WMPAMPRunner save():
+  - rsl_rl v5 actor/critic/distribution/optimizer 状态；
+  - amp_discriminator_state_dict、amp_normalizer_state_dict；
+  - world_model_state_dict、world_model_optimizer_state_dict；
+  - depth_predictor_state_dict、depth_predictor_optimizer_state_dict。
+
+影响:
+  当前 checkpoint 更完整，但和原版 checkpoint key/optimizer/state 结构不兼容。
+  旧 pt 需要转换脚本；从零训练不受此限制。
+
+
+12.10 复查后的优先级更新
+------------------------
+如果下一步要继续缩小与原版训练效果的差距，建议优先级为:
+
+  1. 对比一批 WMP replay sample:
+       prop/action/reward/is_first/image/forward_height_map 的 shape、时间索引、真实 depth 覆盖位置。
+  2. 对比 DepthPredictor 监督采样 env ids，确保默认只用 depth_index_without_crawl_tilt。
+  3. 做 PPO 接口 ablation:
+       obs normalizer、rsl_rl v5 storage/update 细节。
+  4. 记录 reset cause 分布、episode length 分布、AMP policy/expert score 分布。
+  5. 如果 trunk contact reset 占比异常，再评估是否为 A1 WMP 增加 current-force 接触终止路径。

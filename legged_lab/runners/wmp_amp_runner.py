@@ -124,6 +124,10 @@ class WMPAMPRunner:
             amp_cfg.get("replay_buffer_size", 100000),
             amp_cfg.get("grad_penalty_coef", 1.0),
         )
+        min_std = self._make_min_action_std(amp_cfg.get("min_normalized_std"))
+        if min_std is not None and hasattr(self.alg, "set_min_action_std"):
+            self.alg.set_min_action_std(min_std)
+            print(f"[INFO] WMP-AMP min action std clamp: {min_std.detach().cpu().tolist()}")
         retarget_name = retarget_adapter.__class__.__name__
         print(
             f"[INFO] WMP-AMP enabled: expert_dim={amp_data.observation_dim}, "
@@ -142,6 +146,30 @@ class WMPAMPRunner:
             canonical_obs_dim=int(amp_cfg.get("canonical_obs_dim", 30)),
             **retarget_kwargs,
         )
+
+    def _make_min_action_std(self, min_normalized_std) -> torch.Tensor | None:
+        if min_normalized_std is None:
+            return None
+        min_normalized_std = torch.as_tensor(min_normalized_std, device=self.device, dtype=torch.float32)
+        if min_normalized_std.numel() != self.env.num_actions:
+            raise ValueError(
+                "amp.min_normalized_std must have one value per action: "
+                f"got {min_normalized_std.numel()}, expected {self.env.num_actions}."
+            )
+        limits = getattr(self.env.robot.data, "soft_joint_pos_limits", None)
+        if limits is None:
+            limits = getattr(self.env.robot.data, "joint_pos_limits", None)
+        if limits is None:
+            raise RuntimeError("Cannot compute WMP min action std: robot joint position limits are unavailable.")
+        limits = limits[0].to(self.device)
+        action_range = limits[:, 1] - limits[:, 0]
+        if action_range.numel() != self.env.num_actions:
+            raise RuntimeError(
+                "Cannot compute WMP min action std: joint limit dim does not match action dim, "
+                f"limits={action_range.numel()}, actions={self.env.num_actions}."
+            )
+        # 原版公式: min_std = min_normalized_std * (dof_upper_limit - dof_lower_limit)。
+        return min_normalized_std * action_range
 
     def _log_amp_joint_stats(self, amp_data: AMPLoader):
         if not hasattr(amp_data, "preloaded_s"):

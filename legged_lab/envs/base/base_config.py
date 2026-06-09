@@ -130,6 +130,13 @@ class RobotCfg:
     wmp_privileged_contact_body_names: list = []
     terminate_on_flight: bool = False
     terminate_on_flight_threshold: float = 1.0
+    wmp_time_out_strictly_greater: bool = False
+    terminate_on_wmp_velocity_violation: bool = False
+    wmp_velocity_violation_threshold: float = 1.5
+    wmp_velocity_violation_min_terrain_level: int = 4
+    terminate_on_wmp_fall: bool = False
+    wmp_fall_z_velocity_threshold: float = -3.0
+    wmp_fall_projected_gravity_z_threshold: float = 0.0
 
 
 @configclass

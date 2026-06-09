@@ -43,6 +43,8 @@ class BaseEnv(VecEnv):
         self.depth_index = torch.empty(0, device=self.device, dtype=torch.long)
         self.depth_index_inverse = torch.empty(0, device=self.device, dtype=torch.long)
         self.wmp_depth_buffer = None
+        self.wmp_vel_violate_buf = None
+        self.wmp_fall_buf = None
         self.physics_dt = self.cfg.sim.dt
         self.step_dt = self.cfg.sim.decimation * self.cfg.sim.dt
         render_interval = self.cfg.sim.render_interval
@@ -504,12 +506,17 @@ class BaseEnv(VecEnv):
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         terminal_amp_states = self.get_amp_observations()[env_ids]
         self.reset(env_ids)
+        if self.cfg.robot.terminate_on_wmp_velocity_violation and self.wmp_vel_violate_buf is not None:
+            self.extras.setdefault("log", {})["wmp_vel_violate"] = self.wmp_vel_violate_buf.float().mean()
+        if self.cfg.robot.terminate_on_wmp_fall and self.wmp_fall_buf is not None:
+            self.extras.setdefault("log", {})["wmp_fall"] = self.wmp_fall_buf.float().mean()
 
         actor_obs, critic_obs = self.compute_observations()
         obs = TensorDict({"policy": actor_obs, "critic": critic_obs}, batch_size=[self.num_envs])
         self.extras["observations"] = {"critic": critic_obs}
         self.extras["reset_env_ids"] = env_ids
         self.extras["terminal_amp_states"] = terminal_amp_states
+        self.extras["time_outs"] = self.time_out_buf
 
         return obs, reward_buf, self.reset_buf, self.extras
 
@@ -679,7 +686,32 @@ class BaseEnv(VecEnv):
                 > self.cfg.robot.terminate_on_flight_threshold
             )
             reset_buf |= torch.sum(feet_contact, dim=-1) < 0.5
-        time_out_buf = self.episode_length_buf >= self.max_episode_length
+        vel_violate = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        if self.cfg.robot.terminate_on_wmp_velocity_violation:
+            vel_error = self.robot.data.root_lin_vel_b[:, 0] - self.command_generator.command[:, 0]
+            threshold = float(self.cfg.robot.wmp_velocity_violation_threshold)
+            vel_violate = ((vel_error > threshold) & (self.command_generator.command[:, 0] < 0.0)) | (
+                (vel_error < -threshold) & (self.command_generator.command[:, 0] > 0.0)
+            )
+            terrain_levels = getattr(self, "terrain_levels", None)
+            if terrain_levels is not None:
+                vel_violate &= terrain_levels > int(self.cfg.robot.wmp_velocity_violation_min_terrain_level) - 1
+            else:
+                vel_violate &= False
+            reset_buf |= vel_violate
+        fall = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        if self.cfg.robot.terminate_on_wmp_fall:
+            # 原版 WMP: fall = (root_states[:, 9] < -3) | (projected_gravity[:, 2] > 0)。
+            fall = (self.robot.data.root_lin_vel_w[:, 2] < float(self.cfg.robot.wmp_fall_z_velocity_threshold)) | (
+                self.robot.data.projected_gravity_b[:, 2] > float(self.cfg.robot.wmp_fall_projected_gravity_z_threshold)
+            )
+            reset_buf |= fall
+        self.wmp_vel_violate_buf = vel_violate
+        self.wmp_fall_buf = fall
+        if self.cfg.robot.wmp_time_out_strictly_greater:
+            time_out_buf = self.episode_length_buf > self.max_episode_length
+        else:
+            time_out_buf = self.episode_length_buf >= self.max_episode_length
         reset_buf |= time_out_buf
         return reset_buf, time_out_buf
 
