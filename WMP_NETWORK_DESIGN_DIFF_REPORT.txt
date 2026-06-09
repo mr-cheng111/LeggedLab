@@ -808,8 +808,8 @@ critic 维度已经对齐，下一步不是改维度，而是验收字段语义:
   - 后续只需在真实 depth 分布异常时，再回到相机图像统计和可视化检查。
 
 
-12.5 World model replay 采样仍不是逐行等价
-------------------------------------------
+12.5 World model replay 采样复查与修正
+--------------------------------------
 原版 train_world_model():
   - p = wm_dataset_size / sum(wm_dataset_size) 按 env episode 长度加权采样 env。
   - batch_length = min(sampled_env_dataset_size.min(), config.batch_length)。
@@ -817,29 +817,56 @@ critic 维度已经对齐，下一步不是改维度，而是验收字段语义:
   - 非真实相机 env 的 image 在 sample 时即时由 DepthPredictor(forward_height_map, prop) 生成。
   - is_first 每个 batch 第一帧置 1。
 
-当前 WMPFixedEpisodeReplayBuffer:
-  - 也按 dataset_size 加权采样 env，并把 batch 第一帧 is_first 置 1。
-  - 但 replay 存储、episode finish、image 缺失标记、depth_index_slot 和 sample_real_depth 的实现不是原版逐行迁移。
-  - 当前 train_start_steps 使用 replay.num_steps；原版使用 sum_wm_dataset_size。
+本轮复查发现的严重问题:
+  - WMPTrainingController 构造 WMPFixedEpisodeReplayBuffer 时传入
+    depth_index_without_crawl_tilt、depth_index_inverse、depth_predictor_excluded_env_ids，
+    但 WMPFixedEpisodeReplayBuffer.__init__ 之前没有接收这些参数。
+  - 这不是采样分布差异，而是 WMP controller 初始化会直接 TypeError 的硬问题。
+
+已修正:
+  - WMPFixedEpisodeReplayBuffer.__init__ 已接收并保存上述 depth index 参数。
+  - camera_env_ids 不再排序去重，而是保留 env.depth_index 的传入顺序去重；
+    这样真实 depth 的 camera slot 与 env id 映射不会被 replay buffer 打乱。
+  - sample() 改回原版动态 batch_length 语义:
+      先按 p_i = dataset_size_i / sum(dataset_size) 采样 env；
+      再用 batch_length = min(sampled_dataset_size.min(), config.batch_length)；
+      最后对每个 env 随机 end_idx 并切片 [end_idx-batch_length, end_idx)。
+  - 因此短 episode / 失败 episode 不会因为长度小于 config.batch_length 被长期排除。
+  - sample() 仍强制 out["is_first"][:, 0] = 1，并清零后续帧，和原版一致。
+  - 非真实相机 env 的 image 仍先返回零占位，再由 _materialize_sampled_images()
+    使用 DepthPredictor(forward_height_map, prop) 补齐，语义等价原版 sample 时即时生成。
+  - 真实 depth 监督采样改为只使用 depth_index_without_crawl_tilt，并按 has_real_depth 过滤有效时间步。
 
 影响:
-  当前方向是语义接近，但仍应把 world model loss 曲线差异优先归因到 replay/tick/sample 细节，而不是 RSSM 网络结构。
+  - 原先可能的严重问题是初始化直接失败，以及短 episode 被 world model 训练样本排除；
+    这两项已经修正。
+  - 现在 replay 采样不会跨 episode，dataset_size 之外的旧尾部数据不会被采到。
+  - 仍需关注 world model loss 曲线差异，但优先级应从“采样硬 bug”降为“实现细节与时序差异”。
+
+仍不是逐行等价:
+  - 当前使用 WMPFixedEpisodeReplayBuffer 封装 replay，内部结构不同于原版 wm_dataset/wm_buffer 两套 dict。
+  - train_start_steps 当前使用 replay.num_steps；原版使用 sum_wm_dataset_size。两者在语义上接近，
+    但如果后续引入容量裁剪或多 episode replay，可能需要重新对齐。
+  - image 缺失标记使用 has_real_depth / camera slot 判断，不再依赖原版 np.where(env.depth_index == idx) 的逐行写法。
 
 
-12.6 DepthPredictor 监督采样仍有细节差异
-----------------------------------------
+12.6 DepthPredictor 监督采样已按原版主要语义收窄
+-----------------------------------------------
 原版 train_depth_predictor():
   - batch_idx 从 env.depth_index_without_crawl_tilt 采样。
   - time_index 对每个 env 从 [0, wm_dataset_size[idx]] 采样。
   - image 使用 env.depth_index_inverse[batch_idx] 映射到真实相机 image buffer。
 
 当前:
-  - sample_real_depth() 从 camera_env_ids 中 dataset_size > 0 的 env 采样。
-  - 是否严格排除 tilt/crawl 取决于 camera_env_ids、depth_index_without_crawl_tilt 和 has_real_depth 的联动。
+  - sample_real_depth() 已从 depth_index_without_crawl_tilt 中采样 env。
+  - depth_predictor_excluded_env_ids 会进一步排除 tilt/crawl env。
+  - 采样时间步会按 has_real_depth 过滤，避免抽到没有真实 depth 写入的空 image。
+  - image 通过 env_to_camera_slot / depth_index_inverse 语义映射到真实相机 image buffer。
 
 风险:
-  如果 tilt/crawl env 进入 DepthPredictor 监督采样，训练分布会比原版更难；
-  如果 time_index 边界和原版不同，也会改变 early episode 的监督样本。
+  - 原版 time_index 使用 np.random.randint(0, wm_dataset_size[idx] + 1)，当前使用有效真实 depth 时间步集合。
+    这样更能避免空 depth 样本，但不是逐行等价。
+  - 如果真实 depth 更新频率或 has_real_depth 标记异常，DepthPredictor 监督样本数会下降。
 
 
 12.7 Domain randomization 数值来源接近，但执行时机不同
@@ -896,9 +923,10 @@ critic 维度已经对齐，下一步不是改维度，而是验收字段语义:
 ------------------------
 如果下一步要继续缩小与原版训练效果的差距，建议优先级为:
 
-  1. 对比一批 WMP replay sample:
+  1. 抽样验收 WMP replay batch:
        prop/action/reward/is_first/image/forward_height_map 的 shape、时间索引、真实 depth 覆盖位置。
-  2. 对比 DepthPredictor 监督采样 env ids，确保默认只用 depth_index_without_crawl_tilt。
+  2. 记录 DepthPredictor 监督采样统计:
+       env ids 是否来自 depth_index_without_crawl_tilt、has_real_depth 命中率、loss 初始量级。
   3. 做 PPO 接口 ablation:
        obs normalizer、rsl_rl v5 storage/update 细节。
   4. 记录 reset cause 分布、episode length 分布、AMP policy/expert score 分布。
