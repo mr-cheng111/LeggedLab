@@ -41,7 +41,14 @@ class AMPDiscriminator(nn.Module):
         )[0]
         return lambda_ * grad.norm(2, dim=1).pow(2).mean()
 
-    def predict_amp_reward(self, state: torch.Tensor, next_state: torch.Tensor, task_reward: torch.Tensor, normalizer=None):
+    def predict_amp_reward(
+        self,
+        state: torch.Tensor,
+        next_state: torch.Tensor,
+        task_reward: torch.Tensor,
+        normalizer=None,
+        return_details: bool = False,
+    ):
         with torch.no_grad():
             self.eval()
             if normalizer is not None:
@@ -49,9 +56,12 @@ class AMPDiscriminator(nn.Module):
                 next_state = normalizer.normalize_torch(next_state, next_state.device)
             d = self.forward(torch.cat([state, next_state], dim=-1))
             # WMP 原式: r_amp = coef * clamp(1 - 1/4 * (D(s,s') - 1)^2, min=0)
-            reward = self.amp_reward_coef * torch.clamp(1.0 - 0.25 * torch.square(d - 1.0), min=0.0)
+            amp_reward = self.amp_reward_coef * torch.clamp(1.0 - 0.25 * torch.square(d - 1.0), min=0.0)
+            reward = amp_reward
             if self.task_reward_lerp > 0:
-                # WMP 源码保留了 lerp 参数名，但实际返回 disc_r + task_r。
+                # WMP 原版 `_lerp_reward` 的实际实现为 r = disc_r + task_r。
                 reward = reward + task_reward.unsqueeze(-1)
             self.train()
+        if return_details:
+            return reward.squeeze(-1), d.squeeze(-1), amp_reward.squeeze(-1)
         return reward.squeeze(-1), d.squeeze(-1)

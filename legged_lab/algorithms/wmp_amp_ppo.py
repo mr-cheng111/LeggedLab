@@ -25,6 +25,29 @@ class WMPAMPPPO(PPO):
         self.vel_predict_coef = float(vel_predict_coef)
         self.vel_target_start = int(vel_target_start)
         self.vel_target_dim = int(vel_target_dim)
+        self.min_action_std: torch.Tensor | None = None
+
+    def set_min_action_std(self, min_action_std: torch.Tensor | None) -> None:
+        if min_action_std is None:
+            self.min_action_std = None
+            return
+        self.min_action_std = min_action_std.detach().to(self.device).float()
+
+    def _clamp_action_std(self) -> None:
+        if self.min_action_std is None:
+            return
+        distribution = getattr(self.actor, "distribution", None)
+        if distribution is None:
+            return
+        # 原版 AMPPPO 在每次 optimizer.step() 后执行:
+        #   std = clamp(std, min_normalized_std * (upper_limit - lower_limit))
+        # rsl_rl v5 的 GaussianDistribution 支持 scalar std 或 log std 两种参数化。
+        if hasattr(distribution, "std_param"):
+            min_std = self.min_action_std.to(distribution.std_param.device)
+            distribution.std_param.data.clamp_(min=min_std)
+        elif hasattr(distribution, "log_std_param"):
+            min_log_std = torch.log(torch.clamp(self.min_action_std, min=1.0e-8)).to(distribution.log_std_param.device)
+            distribution.log_std_param.data.clamp_(min=min_log_std)
 
     def attach_amp(
         self,
@@ -49,32 +72,21 @@ class WMPAMPPPO(PPO):
         self._last_amp_obs = amp_obs.detach().to(self.device) if amp_obs is not None else None
         return super().act(obs)
 
-    def process_env_step(self, obs, rewards, dones, extras, next_amp_obs=None, task_rewards=None):
+    def process_env_step(self, obs, rewards, dones, extras, next_amp_obs=None, task_rewards=None, amp_rewards=None):
         if self._last_amp_obs is not None and next_amp_obs is not None:
             next_amp_obs = next_amp_obs.detach().to(self.device)
             self.amp_storage.insert(self._last_amp_obs, next_amp_obs)
-            self._last_amp_reward = rewards.detach().to(self.device)
+            if amp_rewards is not None:
+                self._last_amp_reward = amp_rewards.detach().to(self.device)
             if task_rewards is not None:
                 self._last_task_reward = task_rewards.detach().to(self.device)
         super().process_env_step(obs, rewards, dones, extras)
 
-    def compute_returns(self, obs):
-        st = self.storage
-        last_values = self.critic(obs).detach()
-        advantage = 0
-        for step in reversed(range(st.num_transitions_per_env)):
-            next_values = last_values if step == st.num_transitions_per_env - 1 else st.values[step + 1]
-            next_is_not_terminal = 1.0 - st.dones[step].float()
-            delta = st.rewards[step] + next_is_not_terminal * self.gamma * next_values - st.values[step]
-            advantage = delta + next_is_not_terminal * self.gamma * self.lam * advantage
-            st.returns[step] = advantage + st.values[step]
-        st.advantages = st.returns - st.values
-        if not self.normalize_advantage_per_mini_batch:
-            st.advantages = (st.advantages - st.advantages.mean()) / (st.advantages.std(unbiased=False) + 1e-8)
-
     def update(self):
         if self.amp_storage.num_samples == 0:
-            return super().update()
+            loss_dict = super().update()
+            self._clamp_action_std()
+            return loss_dict
 
         mean_value_loss = 0.0
         mean_surrogate_loss = 0.0
@@ -180,6 +192,7 @@ class WMPAMPPPO(PPO):
             if self.is_multi_gpu:
                 self.reduce_parameters()
             self.optimizer.step()
+            self._clamp_action_std()
 
             self.amp_normalizer.update(policy_state)
             self.amp_normalizer.update(expert_state)

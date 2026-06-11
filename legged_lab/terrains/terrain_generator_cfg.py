@@ -165,6 +165,16 @@ WMP_STAIR_TERRAINS_CFG = make_single_terrain_cfg(
     terrain_gen.MeshPlaneTerrainCfg(proportion=1.0),
 )
 
+WMP_STAIR_UP_TERRAINS_CFG = make_single_terrain_cfg(
+    "wmp_stair_up",
+    terrain_gen.MeshPlaneTerrainCfg(proportion=1.0),
+)
+
+WMP_STAIR_DOWN_TERRAINS_CFG = make_single_terrain_cfg(
+    "wmp_stair_down",
+    terrain_gen.MeshPlaneTerrainCfg(proportion=1.0),
+)
+
 WMP_GAP_TERRAINS_CFG = make_single_terrain_cfg(
     "wmp_gap",
     terrain_gen.MeshPlaneTerrainCfg(proportion=1.0),
@@ -189,6 +199,8 @@ WMP_CRAWL_TERRAINS_CFG = make_single_terrain_cfg(
 WMP_TERRAIN_CFGS = {
     "slope": WMP_SLOPE_TERRAINS_CFG,
     "stair": WMP_STAIR_TERRAINS_CFG,
+    "stair_up": WMP_STAIR_UP_TERRAINS_CFG,
+    "stair_down": WMP_STAIR_DOWN_TERRAINS_CFG,
     "gap": WMP_GAP_TERRAINS_CFG,
     "climb": WMP_CLIMB_TERRAINS_CFG,
     "tilt": WMP_TILT_TERRAINS_CFG,

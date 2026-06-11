@@ -49,6 +49,18 @@ def add_rsl_rl_args(parser: argparse.ArgumentParser):
     arg_group.add_argument("--resume", type=bool, default=None, help="Whether to resume from a checkpoint.")
     arg_group.add_argument("--load_run", type=str, default=None, help="Name of the run folder to resume from.")
     arg_group.add_argument("--checkpoint", type=str, default=None, help="Checkpoint file to resume from.")
+    arg_group.add_argument(
+        "--warm_start_checkpoint",
+        type=str,
+        default=None,
+        help="Load model weights from this checkpoint but start a fresh training run from iteration 0.",
+    )
+    arg_group.add_argument(
+        "--warm_start_load_optimizer",
+        action="store_true",
+        default=False,
+        help="Also load optimizer states during warm-start. Defaults to false.",
+    )
     # -- logger arguments
     arg_group.add_argument(
         "--logger", type=str, default="wandb", choices={"wandb", "tensorboard", "neptune"}, help="Logger module to use."

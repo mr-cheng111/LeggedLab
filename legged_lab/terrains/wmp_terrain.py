@@ -30,7 +30,6 @@ from scipy.ndimage import binary_dilation
 from scipy import interpolate
 
 import isaaclab.sim as sim_utils
-from isaaclab.terrains.height_field.utils import convert_height_field_to_mesh
 from isaaclab.terrains.terrain_importer import TerrainImporter
 
 if TYPE_CHECKING:
@@ -62,6 +61,7 @@ class WMPHeightFieldTerrainGenerator:
         self._tot_cols = cfg.num_cols * self._sub_cols + 2 * self.wmp_border_cells
         self.height_field_raw = np.zeros((self._tot_rows, self._tot_cols), dtype=np.int16)
         self.terrain_origins = np.zeros((cfg.num_rows, cfg.num_cols, 3), dtype=np.float32)
+        self.col_kinds = [self._terrain_kind_for_col(col) for col in range(cfg.num_cols)]
 
         self._generate_wmp_terrains()
         vertices, triangles, move_x = _convert_heightfield_to_trimesh_with_x_edges(
@@ -99,10 +99,10 @@ class WMPHeightFieldTerrainGenerator:
     def _generate_wmp_terrains(self):
         for row in range(self.cfg.num_rows):
             for col in range(self.cfg.num_cols):
-                kind = self._terrain_kind_for_col(col)
+                kind = self.col_kinds[col]
                 if self.cfg.curriculum:
                     lower, upper = self.cfg.difficulty_range
-                    difficulty = lower + (upper - lower) * ((row + np.random.random()) / self.cfg.num_rows)
+                    difficulty = lower + (upper - lower) * (row / self.cfg.num_rows)
                 else:
                     difficulty = float(np.random.uniform(*self.cfg.difficulty_range))
                 terrain = np.zeros((self._sub_rows, self._sub_cols), dtype=np.int16)
@@ -206,15 +206,58 @@ def _convert_heightfield_to_trimesh_with_x_edges(
     vertical_scale: float,
     slope_threshold: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return IsaacLab heightfield mesh plus WMP's `move_x != 0` edge mask."""
+    """WMP 原版 heightfield -> trimesh 转换，并返回 `move_x != 0` edge mask。
+
+    原版在高度差超过阈值时移动网格顶点来制造近似垂直面：
+        threshold = slope_threshold * horizontal_scale / vertical_scale
+        x' = x + (move_x + move_corners * 1(move_x == 0)) * horizontal_scale
+        y' = y + (move_y + move_corners * 1(move_y == 0)) * horizontal_scale
+    这里直接复刻 ByteDance WMP `convert_heightfield_to_trimesh()`，避免 IsaacLab
+    内置转换和原版在 gap/climb 边缘几何上出现细小差异。
+    """
     hf = height_field_raw
     num_rows, num_cols = hf.shape
+
+    y = np.linspace(0.0, (num_cols - 1) * horizontal_scale, num_cols)
+    x = np.linspace(0.0, (num_rows - 1) * horizontal_scale, num_rows)
+    yy, xx = np.meshgrid(y, x)
+
     move_x = np.zeros((num_rows, num_cols), dtype=np.float32)
     if slope_threshold is not None:
         threshold = slope_threshold * horizontal_scale / vertical_scale
+        move_y = np.zeros((num_rows, num_cols), dtype=np.float32)
+        move_corners = np.zeros((num_rows, num_cols), dtype=np.float32)
         move_x[: num_rows - 1, :] += hf[1:num_rows, :] - hf[: num_rows - 1, :] > threshold
         move_x[1:num_rows, :] -= hf[: num_rows - 1, :] - hf[1:num_rows, :] > threshold
-    vertices, triangles = convert_height_field_to_mesh(hf, horizontal_scale, vertical_scale, slope_threshold)
+        move_y[:, : num_cols - 1] += hf[:, 1:num_cols] - hf[:, : num_cols - 1] > threshold
+        move_y[:, 1:num_cols] -= hf[:, : num_cols - 1] - hf[:, 1:num_cols] > threshold
+        move_corners[: num_rows - 1, : num_cols - 1] += (
+            hf[1:num_rows, 1:num_cols] - hf[: num_rows - 1, : num_cols - 1] > threshold
+        )
+        move_corners[1:num_rows, 1:num_cols] -= (
+            hf[: num_rows - 1, : num_cols - 1] - hf[1:num_rows, 1:num_cols] > threshold
+        )
+        xx += (move_x + move_corners * (move_x == 0)) * horizontal_scale
+        yy += (move_y + move_corners * (move_y == 0)) * horizontal_scale
+
+    vertices = np.zeros((num_rows * num_cols, 3), dtype=np.float32)
+    vertices[:, 0] = xx.flatten()
+    vertices[:, 1] = yy.flatten()
+    vertices[:, 2] = hf.flatten() * vertical_scale
+    triangles = -np.ones((2 * (num_rows - 1) * (num_cols - 1), 3), dtype=np.uint32)
+    for row in range(num_rows - 1):
+        ind0 = np.arange(0, num_cols - 1) + row * num_cols
+        ind1 = ind0 + 1
+        ind2 = ind0 + num_cols
+        ind3 = ind2 + 1
+        start = 2 * row * (num_cols - 1)
+        stop = start + 2 * (num_cols - 1)
+        triangles[start:stop:2, 0] = ind0
+        triangles[start:stop:2, 1] = ind3
+        triangles[start:stop:2, 2] = ind1
+        triangles[start + 1 : stop : 2, 0] = ind0
+        triangles[start + 1 : stop : 2, 1] = ind2
+        triangles[start + 1 : stop : 2, 2] = ind3
     return vertices, triangles, move_x != 0
 
 
@@ -359,6 +402,8 @@ class WMPTerrainImporter(TerrainImporter):
     x_edge_mask: torch.Tensor | None
     wmp_edge_query_offset: tuple[float, float]
     wmp_horizontal_scale: float
+    wmp_terrain_col_kinds: tuple[str, ...]
+    wmp_terrain_cols_by_kind: dict[str, tuple[int, ...]]
     gap_start_col: int
     climb_end_col: int
 
@@ -373,6 +418,8 @@ class WMPTerrainImporter(TerrainImporter):
         self.x_edge_mask = None
         self.wmp_edge_query_offset = (0.0, 0.0)
         self.wmp_horizontal_scale = 1.0
+        self.wmp_terrain_col_kinds = ()
+        self.wmp_terrain_cols_by_kind = {}
         self.gap_start_col = 0
         self.climb_end_col = 0
 
@@ -390,22 +437,17 @@ class WMPTerrainImporter(TerrainImporter):
                 self.x_edge_mask = generator.x_edge_mask
                 self.wmp_edge_query_offset = (cfg.terrain_generator.border_width, cfg.terrain_generator.border_width)
                 self.wmp_horizontal_scale = cfg.terrain_generator.horizontal_scale
-                if len(cfg.terrain_generator.sub_terrains) > 1:
-                    keys = list(cfg.terrain_generator.sub_terrains.keys())
-                    proportions = np.asarray(
-                        [cfg.terrain_generator.sub_terrains[key].proportion for key in keys], dtype=np.float64
-                    )
-                    proportions /= np.sum(proportions)
-                    col_kinds = []
-                    for col in range(cfg.terrain_generator.num_cols):
-                        idx = int(np.min(np.where(col / cfg.terrain_generator.num_cols + 0.001 < np.cumsum(proportions))[0]))
-                        col_kinds.append(keys[idx].removeprefix("wmp_"))
-                    gap_cols = [i for i, kind in enumerate(col_kinds) if kind == "gap"]
-                    climb_cols = [i for i, kind in enumerate(col_kinds) if kind == "climb"]
-                    if gap_cols:
-                        self.gap_start_col = min(gap_cols)
-                    if climb_cols:
-                        self.climb_end_col = max(climb_cols) + 1
+                self.wmp_terrain_col_kinds = tuple(getattr(generator, "col_kinds", ()))
+                cols_by_kind: dict[str, list[int]] = {}
+                for col, kind in enumerate(self.wmp_terrain_col_kinds):
+                    cols_by_kind.setdefault(kind, []).append(col)
+                self.wmp_terrain_cols_by_kind = {kind: tuple(cols) for kind, cols in cols_by_kind.items()}
+                gap_climb_cols = [
+                    col for col, kind in enumerate(self.wmp_terrain_col_kinds) if kind in ("gap", "climb")
+                ]
+                if gap_climb_cols:
+                    self.gap_start_col = min(gap_climb_cols)
+                    self.climb_end_col = max(gap_climb_cols) + 1
         elif self.cfg.terrain_type == "usd":
             if self.cfg.usd_path is None:
                 raise ValueError("Input terrain type is 'usd' but no value provided for 'usd_path'.")

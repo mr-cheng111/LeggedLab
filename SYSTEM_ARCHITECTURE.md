@@ -144,7 +144,7 @@ flowchart TB
     Scene --> Terrain[Terrain / Ground Plane]
     Scene --> Contact[ContactSensor]
     Scene --> Ray[RayCaster / Height Scanner]
-    Scene --> Camera[Gemini2 Depth/RGB Camera]
+    Scene --> Camera[RGBD Camera Depth/RGB Camera]
 
     Managers --> Command[CommandGenerator]
     Managers --> Reward[RewardManager]
@@ -185,7 +185,7 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    Env[BaseEnv with RGBD] --> Depth[Gemini2 depth]
+    Env[BaseEnv with RGBD] --> Depth[RGBD camera depth]
     Env --> Prop[get_wmp_proprioception]
     Env --> AMPObs[get_amp_observations]
 

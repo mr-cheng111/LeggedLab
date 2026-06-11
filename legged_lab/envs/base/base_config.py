@@ -41,6 +41,14 @@ class RewardSettingsCfg:
 
 
 @configclass
+class TerrainCurriculumCfg:
+    """按训练迭代逐步开放地形最大难度行。"""
+
+    enabled: bool = False
+    schedule: tuple[float, float, float, float] = (0.0, 10000.0, 0.0, 5.0)
+
+
+@configclass
 class HeightScannerCfg:
     enable_height_scan: bool = False
     prim_body_name: str = MISSING
@@ -48,12 +56,13 @@ class HeightScannerCfg:
     size: tuple = (1.6, 1.0)
     forward_resolution: float = 0.1
     forward_size: tuple = (2.0, 2.4)
+    forward_offset: tuple = (1.0, 0.0, 0.0)
     debug_vis: bool = False
     drift_range: tuple = (0.0, 0.0)
 
 
 @configclass
-class Gemini2CameraCfg:
+class RGBDCameraCfg:
     """RGBD 相机配置。
 
     RGBD 相机统一在 InteractiveScene clone 完成后生成到机器人 body 下。
@@ -78,17 +87,19 @@ class Gemini2CameraCfg:
     partial_camera_num_envs: int | None = 1024
     partial_camera_seed: int = 42
     partial_camera_force_tilt_crawl: bool = True
-    spawn_prim_path: str = "base/wmp_depth_camera"
+    spawn_prim_path: str = "base/rgbd_camera"
     spawn_offset_pos: tuple[float, float, float] = (0.27, 0.0, 0.03)
     spawn_offset_rot: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
     spawn_offset_convention: str = "world"
     horizontal_aperture: float = 20.955
     vertical_aperture: float | None = None
     horizontal_fov_deg: float | None = 58.0
+    show_visual_model: bool = False
+    visual_model_scale: float = 1.0
     randomize_rotation: bool = True
     randomize_rotation_seed: int | None = None
     random_roll_deg: tuple[float, float] = (0.0, 0.0)
-    random_pitch_deg: tuple[float, float] = (-5.0, 5.0)
+    random_pitch_deg: tuple[float, float] = (5.0, 15.0)
     random_yaw_deg: tuple[float, float] = (0.0, 0.0)
     focal_length: float = 18.9002
     focus_distance: float = 400.0
@@ -103,8 +114,9 @@ class BaseSceneCfg:
     terrain_type: str = MISSING
     terrain_generator: TerrainGeneratorCfg = None
     max_init_terrain_level: int = 5
+    terrain_curriculum: TerrainCurriculumCfg = TerrainCurriculumCfg()
     height_scanner: HeightScannerCfg = HeightScannerCfg()
-    gemini2_camera: Gemini2CameraCfg = Gemini2CameraCfg()
+    rgbd_camera: RGBDCameraCfg = RGBDCameraCfg()
 
 
 @configclass
@@ -115,8 +127,16 @@ class RobotCfg:
     wheel_velocity_scale: float = 8.0
     terminate_contacts_body_names: list = []
     feet_body_names: list = []
+    wmp_privileged_contact_body_names: list = []
     terminate_on_flight: bool = False
     terminate_on_flight_threshold: float = 1.0
+    wmp_time_out_strictly_greater: bool = False
+    terminate_on_wmp_velocity_violation: bool = False
+    wmp_velocity_violation_threshold: float = 1.5
+    wmp_velocity_violation_min_terrain_level: int = 4
+    terminate_on_wmp_fall: bool = False
+    wmp_fall_z_velocity_threshold: float = -3.0
+    wmp_fall_projected_gravity_z_threshold: float = 0.0
 
 
 @configclass
@@ -129,6 +149,9 @@ class ObsScalesCfg:
     joint_vel: float = 1.0
     actions: float = 1.0
     height_scan: float = 1.0
+    com_pos: float = 1.0
+    pd_gains: float = 1.0
+    contact_force: float = 0.01
 
 
 @configclass

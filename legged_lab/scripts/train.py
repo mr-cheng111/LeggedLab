@@ -77,6 +77,13 @@ def setup_wandb_env(logger_name: str):
         os.environ["WANDB_API_KEY"] = args_cli.wandb_api_key
 
 
+def _scene_rgbd_camera_cfg(env_cfg):
+    """读取当前统一的 RGBD camera 配置。"""
+    if hasattr(env_cfg.scene, "rgbd_camera"):
+        return env_cfg.scene.rgbd_camera
+    return None
+
+
 def train():
     runner: OnPolicyRunner
     env = None
@@ -89,14 +96,18 @@ def train():
 
         if args_cli.num_envs is not None:
             env_cfg.scene.num_envs = args_cli.num_envs
+        rgbd_camera_cfg = _scene_rgbd_camera_cfg(env_cfg)
         if getattr(args_cli, "wmp_camera_num_envs", None) is not None:
-            env_cfg.scene.gemini2_camera.partial_camera_num_envs = args_cli.wmp_camera_num_envs
+            if rgbd_camera_cfg is None:
+                raise RuntimeError("--wmp_camera_num_envs requires an RGBD camera config on env_cfg.scene.")
+            rgbd_camera_cfg.partial_camera_num_envs = args_cli.wmp_camera_num_envs
         if args_cli.runner == "wmp_amp" and not getattr(args_cli, "enable_cameras", False):
             print("[WARN] WMP-AMP runner without --enable_cameras: using zero-depth fallback for dry smoke only.")
-            env_cfg.scene.gemini2_camera.enable = False
-            env_cfg.scene.gemini2_camera.enable_depth = False
-            env_cfg.scene.gemini2_camera.enable_rgb = False
-            env_cfg.scene.gemini2_camera.allow_missing_depth_fallback = True
+            if rgbd_camera_cfg is not None:
+                rgbd_camera_cfg.enable = False
+                rgbd_camera_cfg.enable_depth = False
+                rgbd_camera_cfg.enable_rgb = False
+                rgbd_camera_cfg.allow_missing_depth_fallback = True
 
         agent_cfg = update_rsl_rl_cfg(agent_cfg, args_cli)
         env_cfg.scene.seed = agent_cfg.seed
@@ -146,6 +157,24 @@ def train():
         runner = runner_cls(env, cfg_dict, log_dir=log_dir, device=agent_cfg.device)
 
         remaining_iterations = agent_cfg.max_iterations
+        warm_start_checkpoint = getattr(args_cli, "warm_start_checkpoint", None)
+        if warm_start_checkpoint and agent_cfg.resume:
+            raise RuntimeError("--warm_start_checkpoint cannot be used together with --resume.")
+
+        if warm_start_checkpoint:
+            warm_start_checkpoint = os.path.abspath(warm_start_checkpoint)
+            print(f"[INFO] Warm-starting model weights from: {warm_start_checkpoint}")
+            runner.load(
+                warm_start_checkpoint,
+                load_cfg={"optimizer": bool(getattr(args_cli, "warm_start_load_optimizer", False))},
+                strict=True,
+                map_location=agent_cfg.device,
+            )
+            runner.current_learning_iteration = 0
+            print(
+                "[INFO] Warm-start loaded. Reset learning iteration to 0; "
+                f"optimizer_loaded={bool(getattr(args_cli, 'warm_start_load_optimizer', False))}."
+            )
 
         if agent_cfg.resume:
             # get path to previous checkpoint

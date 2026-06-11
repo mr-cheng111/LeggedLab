@@ -14,6 +14,7 @@ import isaacsim.core.utils.torch as torch_utils  # type: ignore
 import math
 import numpy as np
 import torch
+from torch.nn import functional as F
 from isaaclab.assets.articulation import Articulation
 from isaaclab.envs.mdp.commands import UniformVelocityCommand, UniformVelocityCommandCfg
 from isaaclab.managers import EventManager, RewardManager
@@ -21,13 +22,13 @@ from isaaclab.managers.scene_entity_cfg import SceneEntityCfg
 from isaaclab.scene import InteractiveScene
 from isaaclab.sensors import ContactSensor, RayCaster, TiledCameraCfg
 from isaaclab.sim import PhysxCfg, SimulationContext
-from isaaclab.utils.math import quat_from_euler_xyz, quat_mul
+from isaaclab.utils.math import quat_from_angle_axis, quat_mul
 from isaaclab.utils.buffers import CircularBuffer, DelayBuffer
 from rsl_rl.env import VecEnv
 from tensordict import TensorDict
 
 from legged_lab.envs.base.base_env_config import BaseEnvCfg
-from legged_lab.sensors import WMPPartialTiledCamera, WMPPartialTiledCameraCfg, select_wmp_camera_env_ids
+from legged_lab.sensors import WMPPartialTiledCamera, WMPPartialTiledCameraCfg, select_wmp_depth_indices
 from legged_lab.utils.env_utils.scene import SceneCfg
 
 
@@ -38,6 +39,12 @@ class BaseEnv(VecEnv):
         self.cfg = cfg
         self.headless = headless
         self.device = self.cfg.device
+        self.depth_index_without_crawl_tilt = torch.empty(0, device=self.device, dtype=torch.long)
+        self.depth_index = torch.empty(0, device=self.device, dtype=torch.long)
+        self.depth_index_inverse = torch.empty(0, device=self.device, dtype=torch.long)
+        self.wmp_depth_buffer = None
+        self.wmp_vel_violate_buf = None
+        self.wmp_fall_buf = None
         self.physics_dt = self.cfg.sim.dt
         self.step_dt = self.cfg.sim.decimation * self.cfg.sim.dt
         render_interval = self.cfg.sim.render_interval
@@ -76,6 +83,8 @@ class BaseEnv(VecEnv):
         self.x_edge_mask = getattr(self.scene.terrain, "x_edge_mask", None)
         self.wmp_edge_query_offset = getattr(self.scene.terrain, "wmp_edge_query_offset", (0.0, 0.0))
         self.wmp_terrain_horizontal_scale = getattr(self.scene.terrain, "wmp_horizontal_scale", 1.0)
+        self.wmp_terrain_col_kinds = getattr(self.scene.terrain, "wmp_terrain_col_kinds", ())
+        self.wmp_terrain_cols_by_kind = getattr(self.scene.terrain, "wmp_terrain_cols_by_kind", {})
         self.terrain_levels = getattr(self.scene.terrain, "terrain_levels", None)
         self.terrain_types = getattr(self.scene.terrain, "terrain_types", None)
         self.gap_start_col = getattr(self.scene.terrain, "gap_start_col", 0)
@@ -85,21 +94,35 @@ class BaseEnv(VecEnv):
                 "[INFO] WMP x_edge_mask enabled: "
                 f"shape={tuple(self.x_edge_mask.shape)}, true_count={int(self.x_edge_mask.sum().item())}, "
                 f"offset={self.wmp_edge_query_offset}, horizontal_scale={self.wmp_terrain_horizontal_scale}, "
-                f"gap/climb cols=[{self.gap_start_col}, {self.climb_end_col})"
+                f"gap/climb cols=[{self.gap_start_col}, {self.climb_end_col}), "
+                f"col_kinds={self.wmp_terrain_col_kinds}"
             )
         if self.cfg.scene.height_scanner.enable_height_scan:
             self.height_scanner: RayCaster = self.scene.sensors["height_scanner"]
             self.forward_height_scanner: RayCaster = self.scene.sensors["forward_height_scanner"]
-        self.gemini2_depth_camera = self.scene.sensors.get("gemini2_depth_camera")
-        if self.gemini2_depth_camera is not None and hasattr(self.gemini2_depth_camera, "camera_env_ids"):
-            camera_ids = self.gemini2_depth_camera.camera_env_ids.to(self.device)
+        self.rgbd_camera = self.scene.sensors.get("rgbd_camera")
+        if self.rgbd_camera is not None and hasattr(self.rgbd_camera, "camera_env_ids"):
+            camera_ids = self.rgbd_camera.camera_env_ids.to(self.device)
             self.wmp_camera_env_ids = camera_ids
             self.wmp_camera_env_mask = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
             self.wmp_camera_env_mask[camera_ids] = True
+            self.depth_index = camera_ids
+            if hasattr(self.rgbd_camera, "camera_env_id_inverse"):
+                self.depth_index_inverse = self.rgbd_camera.camera_env_id_inverse.to(self.device)
+            else:
+                self.depth_index_inverse = torch.full((self.num_envs,), -1, device=self.device, dtype=torch.long)
+                self.depth_index_inverse[self.depth_index] = torch.arange(self.depth_index.numel(), device=self.device)
+            if self.depth_index_without_crawl_tilt.numel() > 0:
+                valid = self.depth_index_inverse[self.depth_index_without_crawl_tilt] >= 0
+                self.depth_index_without_crawl_tilt = self.depth_index_without_crawl_tilt[valid]
+            self._init_wmp_depth_buffer()
             print(
-                "[INFO] WMP partial depth camera enabled: "
-                f"model={getattr(self.gemini2_depth_camera.cfg, 'camera_model_name', 'unknown')}, "
-                f"camera_envs={int(camera_ids.numel())}/{self.num_envs}"
+                "[INFO] WMP partial RGBD camera enabled: "
+                f"model={getattr(self.rgbd_camera.cfg, 'camera_model_name', 'unknown')}, "
+                f"camera_envs={int(camera_ids.numel())}/{self.num_envs}, "
+                f"depth_index_count={int(self.depth_index.numel())}, "
+                f"depth_index_without_crawl_tilt_count={int(self.depth_index_without_crawl_tilt.numel())}, "
+                f"tilt_crawl_depth_count={int(self.depth_index.numel() - self.depth_index_without_crawl_tilt.numel())}"
             )
 
         command_cfg = UniformVelocityCommandCfg(
@@ -115,32 +138,40 @@ class BaseEnv(VecEnv):
         self.command_generator = UniformVelocityCommand(cfg=command_cfg, env=self)
         self.reward_manager = RewardManager(self.cfg.reward, self)
         self.reward_curriculum_coef = self._init_reward_curriculum_coef()
+        self.terrain_curriculum_max_level = self._terrain_curriculum_allowed_level(0)
 
         self.init_buffers()
         env_ids = torch.arange(self.num_envs, device=self.device)
         self.event_manager = EventManager(self.cfg.domain_rand.events, self)
         if "startup" in self.event_manager.available_modes:
             self.event_manager.apply(mode="startup")
+            self._refresh_wmp_privileged_buffers_from_sim()
         self.reset(env_ids)
         self._is_closed = False
 
     def _attach_rgbd_cameras_after_scene_creation(self):
-        camera = self.cfg.scene.gemini2_camera
+        camera = self.cfg.scene.rgbd_camera
         if not camera.enable:
             return
 
         camera_env_ids = ()
         camera_cfg_cls = TiledCameraCfg
         if camera.partial_camera:
-            camera_env_ids_tensor = select_wmp_camera_env_ids(
+            terrain = getattr(self.scene, "terrain", None)
+            depth_index_without_crawl_tilt, depth_index, depth_index_inverse = select_wmp_depth_indices(
                 num_envs=self.cfg.scene.num_envs,
                 camera_num_envs=camera.partial_camera_num_envs,
                 seed=camera.partial_camera_seed,
                 terrain_generator=self.cfg.scene.terrain_generator,
+                terrain_types=getattr(terrain, "terrain_types", None),
+                terrain_cols_by_kind=getattr(terrain, "wmp_terrain_cols_by_kind", None),
                 force_tilt_crawl=camera.partial_camera_force_tilt_crawl,
                 device="cpu",
             )
-            camera_env_ids = tuple(int(env_id) for env_id in camera_env_ids_tensor.tolist())
+            self.depth_index_without_crawl_tilt = depth_index_without_crawl_tilt.to(self.device)
+            self.depth_index = depth_index.to(self.device)
+            self.depth_index_inverse = depth_index_inverse.to(self.device)
+            camera_env_ids = tuple(int(env_id) for env_id in depth_index.tolist())
             camera_cfg_cls = WMPPartialTiledCameraCfg
 
         prim_path = "{ENV_REGEX_NS}/Robot/" + camera.spawn_prim_path.strip("/")
@@ -164,13 +195,44 @@ class BaseEnv(VecEnv):
         rgbd_camera = self._make_camera_cfg(
             camera_cfg_cls, prim_path, offset_cfg, spawn_cfg, data_types, camera_env_ids, camera_rot
         )
-        if camera.enable_depth:
-            self.scene._sensors["gemini2_depth_camera"] = rgbd_camera
-        elif camera.enable_rgb:
-            self.scene._sensors["gemini2_rgb_camera"] = rgbd_camera
+        if camera.show_visual_model:
+            self._spawn_camera_visual_model(prim_path, camera_env_ids)
+        self.scene._sensors["rgbd_camera"] = rgbd_camera
+
+    def _spawn_camera_visual_model(self, prim_path: str, camera_env_ids):
+        """在真实 USD Camera 下挂一个纯视觉外壳，便于播放时确认相机安装位置。"""
+        camera = self.cfg.scene.rgbd_camera
+        stage = sim_utils.get_current_stage()
+        if camera_env_ids:
+            camera_paths = [prim_path.replace("env_.*", f"env_{int(env_id)}", 1) for env_id in camera_env_ids]
+        else:
+            camera_paths = [prim_path.replace("env_.*", f"env_{env_id}", 1) for env_id in range(self.num_envs)]
+
+        scale = float(camera.visual_model_scale)
+        body_cfg = sim_utils.CuboidCfg(
+            size=(0.055 * scale, 0.040 * scale, 0.032 * scale),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.02, 0.02, 0.025), roughness=0.65),
+        )
+        lens_cfg = sim_utils.CylinderCfg(
+            radius=0.013 * scale,
+            height=0.018 * scale,
+            axis="Z",
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.02, 0.12, 0.45), roughness=0.25),
+        )
+        # USD Camera 局部坐标使用 OpenGL 约定: -Z 为朝向，+Y 向上。
+        # 这些可视几何放在相机后方(+Z)，避免挡住真实深度相机的视锥。
+        for path in camera_paths:
+            if not stage.GetPrimAtPath(path).IsValid():
+                continue
+            body_path = f"{path}/visual_body"
+            lens_path = f"{path}/visual_lens"
+            if not stage.GetPrimAtPath(body_path).IsValid():
+                body_cfg.func(body_path, body_cfg, translation=(0.0, 0.0, 0.035 * scale))
+            if not stage.GetPrimAtPath(lens_path).IsValid():
+                lens_cfg.func(lens_path, lens_cfg, translation=(0.0, 0.0, 0.005 * scale))
 
     def _make_camera_spawn_cfg(self):
-        camera = self.cfg.scene.gemini2_camera
+        camera = self.cfg.scene.rgbd_camera
         focal_length = camera.focal_length
         if camera.horizontal_fov_deg is not None:
             # USD pinhole 相机水平视场:
@@ -191,7 +253,7 @@ class BaseEnv(VecEnv):
         raise ValueError(f"Unsupported camera_model: {camera.camera_model}")
 
     def _make_camera_offset_rotations(self, camera_env_ids):
-        camera = self.cfg.scene.gemini2_camera
+        camera = self.cfg.scene.rgbd_camera
         if not camera.randomize_rotation:
             return None
         count = len(camera_env_ids) if camera_env_ids else self.num_envs
@@ -207,15 +269,19 @@ class BaseEnv(VecEnv):
             return torch.deg2rad(values * (high - low) + low)
 
         base = torch.tensor(camera.spawn_offset_rot, dtype=torch.float32).repeat(count, 1)
-        delta = quat_from_euler_xyz(
-            sample_degrees(camera.random_roll_deg),
-            sample_degrees(camera.random_pitch_deg),
-            sample_degrees(camera.random_yaw_deg),
-        )
-        return quat_mul(base, delta)
+        roll = sample_degrees(camera.random_roll_deg)
+        pitch = sample_degrees(camera.random_pitch_deg)
+        yaw = sample_degrees(camera.random_yaw_deg)
+        local_axes = torch.eye(3, dtype=torch.float32)
+        q_roll = quat_from_angle_axis(roll, local_axes[0].repeat(count, 1))
+        q_pitch = quat_from_angle_axis(pitch, local_axes[1].repeat(count, 1))
+        q_yaw = quat_from_angle_axis(yaw, local_axes[2].repeat(count, 1))
+        # world 相机约定: forward=+X, up=+Z。四元数作用为 v_w = q * v_cam * q^{-1}。
+        # 因此 pitch 应绕相机局部 +Y 轴旋转；正角会把 +X 转向 -Z，即让相机向下俯视。
+        return quat_mul(quat_mul(quat_mul(base, q_roll), q_pitch), q_yaw)
 
     def _make_camera_cfg(self, camera_cfg_cls, prim_path, offset_cfg, spawn_cfg, data_types, camera_env_ids, camera_rot):
-        camera = self.cfg.scene.gemini2_camera
+        camera = self.cfg.scene.rgbd_camera
         kwargs = dict(
             prim_path=prim_path,
             offset=offset_cfg,
@@ -266,8 +332,6 @@ class BaseEnv(VecEnv):
             self.action_buffer.set_time_lag(time_lags, torch.arange(self.num_envs, device=self.device))
         self.last_processed_actions = self.robot.data.default_joint_pos.clone()
         self.motor_strength = torch.ones(self.num_envs, self.num_actions, device=self.device)
-        if self.cfg.domain_rand.motor_strength.enable:
-            self._randomize_motor_strength(torch.arange(self.num_envs, device=self.device))
 
         self.robot_cfg = SceneEntityCfg(name="robot")
         self.robot_cfg.resolve(self.scene)
@@ -277,6 +341,12 @@ class BaseEnv(VecEnv):
         self.termination_contact_cfg.resolve(self.scene)
         self.feet_cfg = SceneEntityCfg(name="contact_sensor", body_names=self.cfg.robot.feet_body_names)
         self.feet_cfg.resolve(self.scene)
+        self.wmp_privileged_contact_cfg = None
+        if self._use_original_wmp_critic_obs():
+            self.wmp_privileged_contact_cfg = SceneEntityCfg(
+                name="contact_sensor", body_names=self.cfg.robot.wmp_privileged_contact_body_names
+            )
+            self.wmp_privileged_contact_cfg.resolve(self.scene)
         self._amp_order_logged = False
 
         self.obs_scales = self.cfg.normalization.obs_scales
@@ -285,6 +355,7 @@ class BaseEnv(VecEnv):
         self.episode_length_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self.sim_step_counter = 0
         self.time_out_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        self._init_wmp_privileged_buffers()
         self.init_obs_buffer()
 
     def compute_current_observations(self):
@@ -310,10 +381,17 @@ class BaseEnv(VecEnv):
         )
 
         root_lin_vel = robot.data.root_lin_vel_b
-        feet_contact = torch.max(torch.norm(net_contact_forces[:, :, self.feet_cfg.body_ids], dim=-1), dim=1)[0] > 0.5
-        current_critic_obs = torch.cat(
-            [current_actor_obs, root_lin_vel * self.obs_scales.lin_vel, feet_contact], dim=-1
-        )
+        if self._use_original_wmp_critic_obs():
+            current_critic_obs = self._compute_original_wmp_critic_obs(
+                current_actor_obs=current_actor_obs,
+                root_lin_vel=root_lin_vel,
+                net_contact_forces=net_contact_forces,
+            )
+        else:
+            feet_contact = torch.max(torch.norm(net_contact_forces[:, :, self.feet_cfg.body_ids], dim=-1), dim=1)[0] > 0.5
+            current_critic_obs = torch.cat(
+                [current_actor_obs, root_lin_vel * self.obs_scales.lin_vel, feet_contact], dim=-1
+            )
 
         return current_actor_obs, current_critic_obs
 
@@ -337,6 +415,8 @@ class BaseEnv(VecEnv):
             if self.add_noise:
                 height_scan += (2 * torch.rand_like(height_scan) - 1) * self.height_scan_noise_vec
             actor_obs = torch.cat([actor_obs, height_scan], dim=-1)
+        if self._use_original_wmp_critic_obs() and critic_obs.shape[-1] != 285:
+            raise RuntimeError(f"Original WMP critic obs must be 285 dim, got {critic_obs.shape[-1]}.")
 
         actor_obs = torch.clip(actor_obs, -self.clip_obs, self.clip_obs)
         critic_obs = torch.clip(critic_obs, -self.clip_obs, self.clip_obs)
@@ -370,8 +450,6 @@ class BaseEnv(VecEnv):
         self.actor_obs_buffer.reset(env_ids)
         self.critic_obs_buffer.reset(env_ids)
         self.action_buffer.reset(env_ids)
-        if self.cfg.domain_rand.motor_strength.enable:
-            self._randomize_motor_strength(env_ids)
         if hasattr(self, "last_push_step_buf"):
             self.last_push_step_buf[env_ids] = -1
         if hasattr(self, "push_recovered_buf"):
@@ -386,8 +464,6 @@ class BaseEnv(VecEnv):
         delayed_actions = self.action_buffer.compute(actions)
 
         cliped_actions = torch.clip(delayed_actions, -self.clip_actions, self.clip_actions).to(self.device)
-        if self.cfg.domain_rand.motor_strength.enable:
-            cliped_actions = cliped_actions * self.motor_strength
         processed_actions = cliped_actions * self.action_scale + self.robot.data.default_joint_pos
         latency_steps = 0
         if self.cfg.domain_rand.action_delay.enable and self.action_delay_mode == "sim_step":
@@ -406,6 +482,8 @@ class BaseEnv(VecEnv):
             action_target = self.last_processed_actions if substep < latency_steps else processed_actions
             self.robot.set_joint_position_target(action_target)
             self.scene.write_data_to_sim()
+            if self.cfg.domain_rand.motor_strength.enable:
+                self._apply_motor_strength_to_torque()
             self.sim.step(render=False)
             if self.sim_step_counter % self.render_interval == 0 and is_rendering:
                 self.sim.render()
@@ -416,6 +494,7 @@ class BaseEnv(VecEnv):
         self.command_generator.compute(self.step_dt)
         if "interval" in self.event_manager.available_modes:
             self.event_manager.apply(mode="interval", dt=self.step_dt)
+        self._update_wmp_depth_buffer()
 
         self.reset_buf, self.time_out_buf = self.check_reset()
         reward_buf = self.reward_manager.compute(self.step_dt)
@@ -423,30 +502,116 @@ class BaseEnv(VecEnv):
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         terminal_amp_states = self.get_amp_observations()[env_ids]
         self.reset(env_ids)
+        if self.cfg.robot.terminate_on_wmp_velocity_violation and self.wmp_vel_violate_buf is not None:
+            self.extras.setdefault("log", {})["wmp_vel_violate"] = self.wmp_vel_violate_buf.float().mean()
+        if self.cfg.robot.terminate_on_wmp_fall and self.wmp_fall_buf is not None:
+            self.extras.setdefault("log", {})["wmp_fall"] = self.wmp_fall_buf.float().mean()
 
         actor_obs, critic_obs = self.compute_observations()
         obs = TensorDict({"policy": actor_obs, "critic": critic_obs}, batch_size=[self.num_envs])
         self.extras["observations"] = {"critic": critic_obs}
         self.extras["reset_env_ids"] = env_ids
         self.extras["terminal_amp_states"] = terminal_amp_states
+        self.extras["time_outs"] = self.time_out_buf
 
         return obs, reward_buf, self.reset_buf, self.extras
 
     def get_depth_observations(self):
-        if self.gemini2_depth_camera is None:
-            if self.cfg.scene.gemini2_camera.allow_missing_depth_fallback:
+        if self.rgbd_camera is None:
+            if self.cfg.scene.rgbd_camera.allow_missing_depth_fallback:
                 return torch.full(
-                    (self.num_envs, self.cfg.scene.gemini2_camera.height, self.cfg.scene.gemini2_camera.width, 1),
-                    self.cfg.scene.gemini2_camera.depth_far,
+                    (self.num_envs, self.cfg.scene.rgbd_camera.height, self.cfg.scene.rgbd_camera.width, 1),
+                    self.cfg.scene.rgbd_camera.depth_far,
                     device=self.device,
                 )
-            raise RuntimeError("Gemini2 depth camera is not enabled for this task.")
-        return self.gemini2_depth_camera.data.output["distance_to_image_plane"]
+            raise RuntimeError("RGBD camera is not enabled for this task.")
+        return self.rgbd_camera.data.output["distance_to_image_plane"]
+
+    def _init_wmp_depth_buffer(self):
+        camera = self.cfg.scene.rgbd_camera
+        if self.depth_index.numel() == 0 or not camera.enable_depth:
+            self.wmp_depth_buffer = None
+            return
+        self.wmp_depth_buffer = torch.zeros(
+            (self.depth_index.numel(), 2, camera.height, camera.width, 1),
+            device=self.device,
+            dtype=torch.float32,
+        )
+
+    def _update_wmp_depth_buffer(self):
+        if self.wmp_depth_buffer is None or self.rgbd_camera is None:
+            return
+        if self.sim_step_counter % self.render_interval != 0:
+            return
+        depth = self.rgbd_camera.data.output.get("distance_to_image_plane")
+        if depth is None:
+            return
+        image = self._depth_to_wmp_image(depth.to(self.device))
+        if image.shape[0] != self.depth_index.numel():
+            raise RuntimeError(
+                "WMP depth buffer expects partial camera batch to match depth_index: "
+                f"depth_batch={image.shape[0]}, depth_index={self.depth_index.numel()}"
+            )
+        reset_like = self.episode_length_buf[self.depth_index] <= 1
+        self.wmp_depth_buffer[:, 0].copy_(self.wmp_depth_buffer[:, 1])
+        self.wmp_depth_buffer[:, 1].copy_(image)
+        if torch.any(reset_like):
+            ids = reset_like.nonzero(as_tuple=False).flatten()
+            self.wmp_depth_buffer[ids, 0].copy_(image[ids])
+            self.wmp_depth_buffer[ids, 1].copy_(image[ids])
+
+    def _depth_to_wmp_image(self, depth: torch.Tensor) -> torch.Tensor:
+        camera = self.cfg.scene.rgbd_camera
+        near = float(camera.depth_near)
+        far = float(camera.depth_far)
+        depth = torch.nan_to_num(depth.float(), nan=far, posinf=far, neginf=-far)
+        if depth.ndim != 4:
+            raise ValueError(f"depth must have shape B,H,W,1 or B,1,H,W, got {tuple(depth.shape)}")
+        if depth.shape[-1] == 1:
+            depth = depth.permute(0, 3, 1, 2)
+        elif depth.shape[1] != 1:
+            raise ValueError(f"depth channel dimension must be 1, got {tuple(depth.shape)}")
+        # 原版 IsaacGym 为负深度: image = ((-depth) - near) / (far - near) - 0.5。
+        # IsaacLab distance_to_image_plane 为正深度；若后端给负数，则先取反统一成正距离。
+        depth = torch.where(depth < 0.0, -depth, depth)
+        depth = torch.clamp(depth, near, far)
+        depth = (depth - near) / max(far - near, 1.0e-6) - 0.5
+        image = F.interpolate(
+            depth,
+            size=(camera.height, camera.width),
+            mode="bilinear",
+            align_corners=False,
+        )
+        return image.permute(0, 2, 3, 1).contiguous()
+
+    def get_wmp_depth_observations(self):
+        if self.wmp_depth_buffer is None:
+            raise RuntimeError("WMP depth buffer is not initialized.")
+        # 原版返回 depth_buffer[:, -2]；最后一帧已经写入 buffer，但 WMP 消费倒数第二帧。
+        return self.wmp_depth_buffer[:, 0]
 
     def get_depth_camera_env_ids(self):
-        if self.gemini2_depth_camera is not None and hasattr(self.gemini2_depth_camera, "camera_env_ids"):
-            return self.gemini2_depth_camera.camera_env_ids.to(self.device)
+        if self.depth_index.numel() > 0:
+            return self.depth_index.to(self.device)
+        if self.rgbd_camera is not None and hasattr(self.rgbd_camera, "camera_env_ids"):
+            return self.rgbd_camera.camera_env_ids.to(self.device)
         return torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+
+    def get_depth_index(self):
+        if self.depth_index.numel() > 0:
+            return self.depth_index.to(self.device)
+        return self.get_depth_camera_env_ids()
+
+    def get_depth_index_without_crawl_tilt(self):
+        return self.depth_index_without_crawl_tilt.to(self.device)
+
+    def get_depth_index_inverse(self):
+        if self.depth_index_inverse.numel() == self.num_envs:
+            return self.depth_index_inverse.to(self.device)
+        inverse = torch.full((self.num_envs,), -1, device=self.device, dtype=torch.long)
+        depth_index = self.get_depth_index()
+        inverse[depth_index] = torch.arange(depth_index.numel(), device=self.device, dtype=torch.long)
+        return inverse
 
     def get_wmp_proprioception(self):
         robot = self.robot
@@ -517,7 +682,32 @@ class BaseEnv(VecEnv):
                 > self.cfg.robot.terminate_on_flight_threshold
             )
             reset_buf |= torch.sum(feet_contact, dim=-1) < 0.5
-        time_out_buf = self.episode_length_buf >= self.max_episode_length
+        vel_violate = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        if self.cfg.robot.terminate_on_wmp_velocity_violation:
+            vel_error = self.robot.data.root_lin_vel_b[:, 0] - self.command_generator.command[:, 0]
+            threshold = float(self.cfg.robot.wmp_velocity_violation_threshold)
+            vel_violate = ((vel_error > threshold) & (self.command_generator.command[:, 0] < 0.0)) | (
+                (vel_error < -threshold) & (self.command_generator.command[:, 0] > 0.0)
+            )
+            terrain_levels = getattr(self, "terrain_levels", None)
+            if terrain_levels is not None:
+                vel_violate &= terrain_levels > int(self.cfg.robot.wmp_velocity_violation_min_terrain_level) - 1
+            else:
+                vel_violate &= False
+            reset_buf |= vel_violate
+        fall = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        if self.cfg.robot.terminate_on_wmp_fall:
+            # 原版 WMP: fall = (root_states[:, 9] < -3) | (projected_gravity[:, 2] > 0)。
+            fall = (self.robot.data.root_lin_vel_w[:, 2] < float(self.cfg.robot.wmp_fall_z_velocity_threshold)) | (
+                self.robot.data.projected_gravity_b[:, 2] > float(self.cfg.robot.wmp_fall_projected_gravity_z_threshold)
+            )
+            reset_buf |= fall
+        self.wmp_vel_violate_buf = vel_violate
+        self.wmp_fall_buf = fall
+        if self.cfg.robot.wmp_time_out_strictly_greater:
+            time_out_buf = self.episode_length_buf > self.max_episode_length
+        else:
+            time_out_buf = self.episode_length_buf >= self.max_episode_length
         reset_buf |= time_out_buf
         return reset_buf, time_out_buf
 
@@ -553,6 +743,180 @@ class BaseEnv(VecEnv):
             max_len=self.cfg.robot.critic_obs_history_length, batch_size=self.num_envs, device=self.device
         )
 
+    def _init_wmp_privileged_buffers(self):
+        """缓存原版 WMP critic 需要的 privileged 域随机化量。
+
+        原版 critic 布局:
+            contact_flag(8) + contact_force(12) + d_gain_scale(12) + p_gain_scale(12)
+            + com_pos(3) + added_mass(1) + restitution(1) + friction(1)
+            + base_lin_vel(3) + actor_obs(45) = 98
+
+        再在 `compute_observations()` 末尾拼接 height_scan(187)，得到原版的 285 维 critic obs。
+        A1 WMP 使用记录型 startup EventTerm，同一次 sample 会同时写入物理仿真和这些 buffer；
+        这里的初始化值只作为 EventTerm 缺失时的保底。
+        """
+        if not self._use_original_wmp_critic_obs():
+            return
+        self.wmp_priv_friction = torch.zeros(self.num_envs, 1, device=self.device)
+        self.wmp_priv_restitution = torch.zeros(self.num_envs, 1, device=self.device)
+        self.wmp_priv_added_mass = torch.zeros(self.num_envs, 1, device=self.device)
+        self.wmp_priv_com_pos = torch.zeros(self.num_envs, 3, device=self.device)
+        self.wmp_priv_p_gain_scale = torch.zeros(self.num_envs, self.num_actions, device=self.device)
+        self.wmp_priv_d_gain_scale = torch.zeros(self.num_envs, self.num_actions, device=self.device)
+        self.wmp_priv_default_coms = self.robot.root_physx_view.get_coms().to(self.device).clone()
+        self.wmp_critic_obs_slices = {
+            "contact_flag": slice(0, 8),
+            "contact_force": slice(8, 20),
+            "d_gain_scale": slice(20, 32),
+            "p_gain_scale": slice(32, 44),
+            "com_pos": slice(44, 47),
+            "added_mass": slice(47, 48),
+            "restitution": slice(48, 49),
+            "friction": slice(49, 50),
+            "base_lin_vel": slice(50, 53),
+            "actor_obs": slice(53, 98),
+            "height_scan": slice(98, 285),
+        }
+        self._sample_wmp_privileged_randomization(torch.arange(self.num_envs, device=self.device))
+
+    def _use_original_wmp_critic_obs(self) -> bool:
+        return len(self.cfg.robot.wmp_privileged_contact_body_names) > 0
+
+    def _sample_wmp_privileged_randomization(self, env_ids: torch.Tensor):
+        if len(env_ids) == 0:
+            return
+
+        def uniform(bounds, shape):
+            low, high = float(bounds[0]), float(bounds[1])
+            if abs(high - low) < 1.0e-8:
+                return torch.full(shape, low, device=self.device)
+            return torch.empty(shape, device=self.device).uniform_(low, high)
+
+        events = self.cfg.domain_rand.events
+        physics_material = getattr(events, "physics_material", None)
+        if physics_material is not None:
+            params = physics_material.params
+            self.wmp_priv_friction[env_ids] = uniform(params.get("static_friction_range", (1.0, 1.0)), (len(env_ids), 1))
+            self.wmp_priv_restitution[env_ids] = uniform(params.get("restitution_range", (0.0, 0.0)), (len(env_ids), 1))
+
+        add_base_mass = getattr(events, "add_base_mass", None)
+        if add_base_mass is not None:
+            params = add_base_mass.params
+            if params.get("operation", "add") == "add":
+                self.wmp_priv_added_mass[env_ids] = uniform(
+                    params.get("mass_distribution_params", (0.0, 0.0)), (len(env_ids), 1)
+                )
+
+        randomize_base_com = getattr(events, "randomize_base_com", None)
+        if randomize_base_com is not None:
+            com_range = randomize_base_com.params.get("com_range", {})
+            self.wmp_priv_com_pos[env_ids, 0] = uniform(com_range.get("x", (0.0, 0.0)), (len(env_ids),))
+            self.wmp_priv_com_pos[env_ids, 1] = uniform(com_range.get("y", (0.0, 0.0)), (len(env_ids),))
+            self.wmp_priv_com_pos[env_ids, 2] = uniform(com_range.get("z", (0.0, 0.0)), (len(env_ids),))
+
+        randomize_actuator_gains = getattr(events, "randomize_actuator_gains", None)
+        if randomize_actuator_gains is not None:
+            params = randomize_actuator_gains.params
+            if params.get("operation", "scale") == "scale":
+                self.wmp_priv_p_gain_scale[env_ids] = uniform(
+                    params.get("stiffness_distribution_params", (1.0, 1.0)), (len(env_ids), self.num_actions)
+                ) - 1.0
+                self.wmp_priv_d_gain_scale[env_ids] = uniform(
+                    params.get("damping_distribution_params", (1.0, 1.0)), (len(env_ids), self.num_actions)
+                ) - 1.0
+
+    def _refresh_wmp_privileged_buffers_from_sim(self):
+        if not self._use_original_wmp_critic_obs():
+            return
+        env_ids = torch.arange(self.num_envs, device=self.device)
+
+        try:
+            materials = self.robot.root_physx_view.get_material_properties().to(self.device)
+            if materials.ndim == 3 and materials.shape[-1] >= 3:
+                self.wmp_priv_friction[env_ids] = materials[..., 0].mean(dim=1, keepdim=True)
+                self.wmp_priv_restitution[env_ids] = materials[..., 2].mean(dim=1, keepdim=True)
+        except Exception as exc:
+            print(f"[WARN] Failed to sync WMP material privileged obs from sim: {exc}")
+
+        try:
+            body_id = self._first_event_body_id("add_base_mass")
+            masses = self.robot.root_physx_view.get_masses().to(self.device)
+            default_masses = self.robot.data.default_mass.to(self.device)
+            self.wmp_priv_added_mass[env_ids] = masses[:, body_id : body_id + 1] - default_masses[:, body_id : body_id + 1]
+        except Exception as exc:
+            print(f"[WARN] Failed to sync WMP mass privileged obs from sim: {exc}")
+
+        try:
+            body_id = self._first_event_body_id("randomize_base_com")
+            coms = self.robot.root_physx_view.get_coms().to(self.device)
+            self.wmp_priv_com_pos[env_ids] = coms[:, body_id, :3] - self.wmp_priv_default_coms[:, body_id, :3]
+        except Exception as exc:
+            print(f"[WARN] Failed to sync WMP COM privileged obs from sim: {exc}")
+
+        try:
+            default_stiffness = self.robot.data.default_joint_stiffness.to(self.device)
+            default_damping = self.robot.data.default_joint_damping.to(self.device)
+            stiffness = self.robot.data.joint_stiffness.to(self.device)
+            damping = self.robot.data.joint_damping.to(self.device)
+            self.wmp_priv_p_gain_scale[env_ids] = stiffness / torch.clamp(default_stiffness, min=1.0e-8) - 1.0
+            self.wmp_priv_d_gain_scale[env_ids] = damping / torch.clamp(default_damping, min=1.0e-8) - 1.0
+        except Exception as exc:
+            print(f"[WARN] Failed to sync WMP gain privileged obs from sim: {exc}")
+
+    def _first_event_body_id(self, event_name: str) -> int:
+        event = getattr(self.cfg.domain_rand.events, event_name, None)
+        asset_cfg = None if event is None else event.params.get("asset_cfg")
+        body_ids = getattr(asset_cfg, "body_ids", None)
+        if isinstance(body_ids, slice) or body_ids is None:
+            return 0
+        if isinstance(body_ids, torch.Tensor):
+            return int(body_ids.flatten()[0].item()) if body_ids.numel() > 0 else 0
+        return int(body_ids[0]) if len(body_ids) > 0 else 0
+
+    def _fit_last_dim(self, value: torch.Tensor, target_dim: int) -> torch.Tensor:
+        dim = value.shape[-1]
+        if dim == target_dim:
+            return value
+        if dim > target_dim:
+            return value[..., :target_dim]
+        pad_shape = (*value.shape[:-1], target_dim - dim)
+        return torch.cat([value, torch.zeros(pad_shape, device=value.device, dtype=value.dtype)], dim=-1)
+
+    def _compute_original_wmp_critic_obs(
+        self,
+        current_actor_obs: torch.Tensor,
+        root_lin_vel: torch.Tensor,
+        net_contact_forces: torch.Tensor,
+    ) -> torch.Tensor:
+        latest_forces = net_contact_forces[:, -1]
+        contact_force = latest_forces[:, self.feet_cfg.body_ids].reshape(self.num_envs, -1)
+        contact_force = self._fit_last_dim(contact_force, 12) * self.obs_scales.contact_force
+
+        if self.wmp_privileged_contact_cfg is not None:
+            contact_flag = torch.norm(latest_forces[:, self.wmp_privileged_contact_cfg.body_ids], dim=-1) > 0.1
+        else:
+            contact_flag = torch.zeros(self.num_envs, 0, device=self.device, dtype=torch.bool)
+        contact_flag = self._fit_last_dim(contact_flag.float(), 8)
+
+        current_critic_obs = torch.cat(
+            [
+                contact_flag,
+                contact_force,
+                self.wmp_priv_d_gain_scale * self.obs_scales.pd_gains,
+                self.wmp_priv_p_gain_scale * self.obs_scales.pd_gains,
+                self.wmp_priv_com_pos * self.obs_scales.com_pos,
+                self.wmp_priv_added_mass,
+                self.wmp_priv_restitution,
+                self.wmp_priv_friction,
+                root_lin_vel * self.obs_scales.lin_vel,
+                current_actor_obs,
+            ],
+            dim=-1,
+        )
+        if current_critic_obs.shape[-1] != 98:
+            raise RuntimeError(f"Original WMP critic current obs must be 98 dim, got {current_critic_obs.shape[-1]}.")
+        return current_critic_obs
+
     def update_terrain_levels(self, env_ids):
         distance = torch.norm(self.robot.data.root_pos_w[env_ids, :2] - self.scene.env_origins[env_ids, :2], dim=1)
         move_up = distance > self.scene.terrain.cfg.terrain_generator.size[0] / 2
@@ -561,8 +925,45 @@ class BaseEnv(VecEnv):
         )
         move_down *= ~move_up
         self.scene.terrain.update_env_origins(env_ids, move_up, move_down)
+        self._clamp_terrain_levels(env_ids)
         extras = {"Curriculum/terrain_levels": torch.mean(self.scene.terrain.terrain_levels.float())}
+        if self.terrain_curriculum_max_level is not None:
+            extras["Curriculum/terrain_max_allowed_level"] = float(self.terrain_curriculum_max_level)
         return extras
+
+    def _terrain_curriculum_allowed_level(self, current_iter: int) -> int | None:
+        settings = getattr(self.cfg.scene, "terrain_curriculum", None)
+        if settings is None or not settings.enabled:
+            return None
+        terrain = getattr(self.scene, "terrain", None) if hasattr(self, "scene") else None
+        max_level = int(getattr(terrain, "max_terrain_level", 1)) - 1 if terrain is not None else 0
+        start_iter, end_iter, start_level, end_level = [float(x) for x in settings.schedule]
+        # 线性课程公式：
+        # alpha = clamp((iter - start_iter) / (end_iter - start_iter), 0, 1)
+        # level = round((1 - alpha) * start_level + alpha * end_level)
+        alpha = 1.0 if abs(end_iter - start_iter) < 1.0e-8 else (float(current_iter) - start_iter) / (end_iter - start_iter)
+        alpha = max(0.0, min(1.0, alpha))
+        level = round((1.0 - alpha) * start_level + alpha * end_level)
+        return max(0, min(int(level), max_level))
+
+    def _clamp_terrain_levels(self, env_ids: torch.Tensor):
+        max_level = self.terrain_curriculum_max_level
+        terrain = getattr(self.scene, "terrain", None)
+        if max_level is None or terrain is None or getattr(terrain, "terrain_origins", None) is None:
+            return
+        terrain.terrain_levels[env_ids] = torch.clamp(terrain.terrain_levels[env_ids], max=int(max_level))
+        terrain.env_origins[env_ids] = terrain.terrain_origins[terrain.terrain_levels[env_ids], terrain.terrain_types[env_ids]]
+
+    def update_training_curriculum(self, current_iter: int) -> dict[str, float]:
+        logs = self.update_reward_curriculum(current_iter)
+        allowed_level = self._terrain_curriculum_allowed_level(current_iter)
+        if allowed_level is None:
+            return logs
+        self.terrain_curriculum_max_level = allowed_level
+        env_ids = torch.arange(self.num_envs, device=self.device)
+        self._clamp_terrain_levels(env_ids)
+        logs["Curriculum/terrain_max_allowed_level"] = float(allowed_level)
+        return logs
 
     def _init_reward_curriculum_coef(self) -> dict[str, float]:
         settings = self.cfg.reward_settings
@@ -612,16 +1013,25 @@ class BaseEnv(VecEnv):
             reward_buf = torch.clip(reward_buf, min=0.0)
         return reward_buf
 
-    def _randomize_motor_strength(self, env_ids: torch.Tensor):
-        if len(env_ids) == 0:
-            return
+    def _apply_motor_strength_to_torque(self):
         low, high = self.cfg.domain_rand.motor_strength.range
+        effort_target = getattr(self.robot, "_joint_effort_target_sim", None)
+        all_indices = getattr(self.robot, "_ALL_INDICES", None)
+        if effort_target is None or all_indices is None:
+            raise RuntimeError("WMP motor_strength requires IsaacLab Articulation torque buffers.")
+        if self.motor_strength.shape != effort_target.shape:
+            self.motor_strength = torch.ones_like(effort_target)
+
         if abs(float(high) - float(low)) < 1.0e-8:
-            self.motor_strength[env_ids] = float(low)
-            return
-        self.motor_strength[env_ids] = torch.empty(
-            len(env_ids), self.num_actions, device=self.device
-        ).uniform_(float(low), float(high))
+            self.motor_strength.fill_(float(low))
+        else:
+            self.motor_strength.uniform_(float(low), float(high))
+
+        # 原版 WMP 在 _compute_torques() 完成 torque clip 后执行 tau_final = s * tau。
+        # 这里等待 IsaacLab actuator 生成 _joint_effort_target_sim 后再乘 s，并在 sim.step 前覆盖 PhysX force。
+        effort_target.mul_(self.motor_strength)
+        self.robot.data.applied_torque[:] = effort_target
+        self.robot.root_physx_view.set_dof_actuation_forces(effort_target, all_indices)
 
     def get_observations(self):
         actor_obs, critic_obs = self.compute_observations()
@@ -642,7 +1052,7 @@ class BaseEnv(VecEnv):
         print("[INFO] Closing BaseEnv resources.")
         if hasattr(self, "scene"):
             sensors = getattr(self.scene, "sensors", {})
-            for name in ("gemini2_rgb_camera", "gemini2_depth_camera"):
+            for name in ("rgbd_camera",):
                 if name in sensors:
                     print(f"[INFO] Releasing sensor: {name}")
             del self.scene

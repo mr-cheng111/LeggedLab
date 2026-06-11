@@ -89,7 +89,16 @@ class SceneCfg(InteractiveSceneCfg):
             )
             self.forward_height_scanner = RayCasterCfg(
                 prim_path="{ENV_REGEX_NS}/Robot/" + config.height_scanner.prim_body_name,
-                offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 20.0)),
+                # 原版 WMP forward height map 采样 x=[0,2], y=[-1.2,1.2]。
+                # IsaacLab GridPattern 以局部原点为中心生成 [-1,1]x[-1.2,1.2]，
+                # 因此前移 1m 后得到 x' = x + 1 ∈ [0,2]。
+                offset=RayCasterCfg.OffsetCfg(
+                    pos=(
+                        config.height_scanner.forward_offset[0],
+                        config.height_scanner.forward_offset[1],
+                        20.0 + config.height_scanner.forward_offset[2],
+                    )
+                ),
                 ray_alignment="yaw",
                 pattern_cfg=patterns.GridPatternCfg(
                     resolution=config.height_scanner.forward_resolution,

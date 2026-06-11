@@ -32,7 +32,6 @@ from .base_config import (
     CommandsCfg,
     DomainRandCfg,
     EventCfg,
-    Gemini2CameraCfg,
     HeightScannerCfg,
     MotorStrengthCfg,
     NoiseCfg,
@@ -42,6 +41,7 @@ from .base_config import (
     PhysxCfg,
     RewardCfg,
     RewardSettingsCfg,
+    RGBDCameraCfg,
     RobotCfg,
     SimCfg,
 )
@@ -66,7 +66,7 @@ class BaseEnvCfg:
             debug_vis=False,
             drift_range=(0.0, 0.0),  # (0.3, 0.3)
         ),
-        gemini2_camera=Gemini2CameraCfg(enable=False),
+        rgbd_camera=RGBDCameraCfg(enable=False),
     )
     robot: RobotCfg = RobotCfg(
         actor_obs_history_length=10,

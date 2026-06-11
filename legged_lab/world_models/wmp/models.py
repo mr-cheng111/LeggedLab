@@ -235,17 +235,31 @@ class WMPFixedEpisodeReplayBuffer:
         max_episode_steps: int,
         camera_env_ids: torch.Tensor,
         device: str,
+        depth_index_without_crawl_tilt: torch.Tensor | None = None,
+        depth_index_inverse: torch.Tensor | None = None,
+        depth_predictor_excluded_env_ids: torch.Tensor | None = None,
     ):
         self.num_envs = int(num_envs)
         self.max_episode_steps = int(max_episode_steps)
         self.device = torch.device(device)
-        self.camera_env_ids = camera_env_ids.detach().cpu().long().unique(sorted=True)
-        self.camera_env_ids = self.camera_env_ids[
-            (self.camera_env_ids >= 0) & (self.camera_env_ids < self.num_envs)
-        ]
+        # 保留 env.depth_index 的顺序，避免真实 depth 的 camera slot 与 env id 映射错位。
+        self.camera_env_ids = self._ordered_unique_valid(camera_env_ids)
         self.env_to_camera_slot = torch.full((self.num_envs,), -1, dtype=torch.long)
         if self.camera_env_ids.numel() > 0:
             self.env_to_camera_slot[self.camera_env_ids] = torch.arange(self.camera_env_ids.numel(), dtype=torch.long)
+        self.depth_index_inverse = self._make_depth_index_inverse(depth_index_inverse)
+        if depth_index_without_crawl_tilt is None:
+            depth_index_without_crawl_tilt = self.camera_env_ids
+        self.depth_index_without_crawl_tilt = self._ordered_unique_valid(depth_index_without_crawl_tilt)
+        if depth_predictor_excluded_env_ids is not None:
+            excluded = torch.zeros(self.num_envs, dtype=torch.bool)
+            excluded[self._ordered_unique_valid(depth_predictor_excluded_env_ids)] = True
+            self.depth_index_without_crawl_tilt = self.depth_index_without_crawl_tilt[
+                ~excluded[self.depth_index_without_crawl_tilt]
+            ]
+        if self.depth_index_without_crawl_tilt.numel() > 0:
+            has_camera = self.env_to_camera_slot[self.depth_index_without_crawl_tilt] >= 0
+            self.depth_index_without_crawl_tilt = self.depth_index_without_crawl_tilt[has_camera]
 
         self.current_index = torch.zeros(self.num_envs, dtype=torch.long)
         self.dataset_size = torch.zeros(self.num_envs, dtype=torch.long)
@@ -254,6 +268,7 @@ class WMPFixedEpisodeReplayBuffer:
         self._dataset: dict[str, torch.Tensor] | None = None
         self._current_image: torch.Tensor | None = None
         self._dataset_image: torch.Tensor | None = None
+        self._image_shape: tuple[int, ...] | None = None
 
     def __len__(self):
         return int(self.has_episode.sum().item())
@@ -305,36 +320,40 @@ class WMPFixedEpisodeReplayBuffer:
         self.has_episode[env_id] = True
 
     def can_sample(self, batch_size: int, batch_length: int) -> bool:
+        del batch_length
         if batch_size <= 0 or self._dataset is None:
             return False
-        return bool(torch.any(self.dataset_size >= int(batch_length)).item())
+        return bool(torch.any(self.dataset_size > 1).item())
 
     def can_sample_real_depth(self, batch_size: int) -> bool:
         if batch_size <= 0 or self._dataset is None or self._dataset_image is None:
             return False
-        if self.camera_env_ids.numel() == 0:
-            return False
-        valid_camera_envs = self.camera_env_ids[self.dataset_size[self.camera_env_ids] > 0]
-        return bool(valid_camera_envs.numel() > 0)
+        valid_envs, _ = self._valid_real_depth_envs_and_counts()
+        return bool(valid_envs.numel() > 0)
 
     def sample(self, batch_size: int, batch_length: int) -> dict[str, torch.Tensor]:
         if not self.can_sample(batch_size, batch_length):
             raise RuntimeError("WMP fixed replay buffer does not have enough sequence data.")
         assert self._dataset is not None
 
-        batch_length = int(batch_length)
-        valid_envs = (self.dataset_size >= batch_length).nonzero(as_tuple=False).flatten()
+        requested_batch_length = int(batch_length)
+        valid_envs = (self.dataset_size > 1).nonzero(as_tuple=False).flatten()
         lengths = self.dataset_size[valid_envs].float()
+        # 原版 WMP 采样概率: p_i = dataset_size_i / sum_j(dataset_size_j)。
         probs = lengths / lengths.sum().clamp_min(1.0)
         sampled_slots = torch.multinomial(probs, int(batch_size), replacement=True)
         env_ids = valid_envs[sampled_slots]
+        batch_length = min(int(self.dataset_size[env_ids].min().item()), requested_batch_length)
+        if batch_length <= 1:
+            raise RuntimeError("WMP fixed replay sampled sequence length must be greater than 1.")
 
         batch = {key: [] for key in self._dataset.keys()}
         batch["image"] = []
         for env_id_tensor in env_ids:
             env_id = int(env_id_tensor.item())
             ep_len = int(self.dataset_size[env_id].item())
-            start = int(torch.randint(0, ep_len - batch_length + 1, (1,)).item())
+            end = int(torch.randint(batch_length, ep_len + 1, (1,)).item())
+            start = end - batch_length
             for key, value in self._dataset.items():
                 batch[key].append(value[env_id, start : start + batch_length])
             batch["image"].append(self._sample_image(env_id, start, batch_length))
@@ -351,9 +370,8 @@ class WMPFixedEpisodeReplayBuffer:
         assert self._dataset is not None
         assert self._dataset_image is not None
 
-        valid_envs = self.camera_env_ids[self.dataset_size[self.camera_env_ids] > 0]
-        lengths = self.dataset_size[valid_envs].float()
-        probs = lengths / lengths.sum().clamp_min(1.0)
+        valid_envs, valid_counts = self._valid_real_depth_envs_and_counts()
+        probs = valid_counts.float() / valid_counts.float().sum().clamp_min(1.0)
         sampled_slots = torch.multinomial(probs, int(batch_size), replacement=True)
         env_ids = valid_envs[sampled_slots]
 
@@ -361,7 +379,7 @@ class WMPFixedEpisodeReplayBuffer:
         for env_id_tensor in env_ids:
             env_id = int(env_id_tensor.item())
             ep_len = int(self.dataset_size[env_id].item())
-            step_id = int(torch.randint(0, ep_len, (1,)).item())
+            step_id = self._sample_real_depth_step(env_id, ep_len)
             camera_slot = int(self.env_to_camera_slot[env_id].item())
             batch["forward_height_map"].append(self._dataset["forward_height_map"][env_id, step_id])
             batch["prop"].append(self._dataset["prop"][env_id, step_id])
@@ -379,6 +397,7 @@ class WMPFixedEpisodeReplayBuffer:
             self._dataset[key] = torch.zeros(shape, device=self.device, dtype=torch.float32)
 
         image_shape = tuple(transition["image"].shape)
+        self._image_shape = image_shape
         camera_count = int(self.camera_env_ids.numel())
         if camera_count > 0:
             shape = (camera_count, self.max_episode_steps) + image_shape
@@ -387,8 +406,67 @@ class WMPFixedEpisodeReplayBuffer:
 
     def _sample_image(self, env_id: int, start: int, batch_length: int) -> torch.Tensor:
         if self._dataset_image is None:
-            raise RuntimeError("WMP fixed replay image storage has not been initialized.")
+            if self._image_shape is None:
+                raise RuntimeError("WMP fixed replay image storage has not been initialized.")
+            return torch.zeros((batch_length,) + self._image_shape, device=self.device, dtype=torch.float32)
         camera_slot = int(self.env_to_camera_slot[env_id].item())
         if camera_slot >= 0:
             return self._dataset_image[camera_slot, start : start + batch_length]
         return torch.zeros_like(self._dataset_image[0, start : start + batch_length])
+
+    def _ordered_unique_valid(self, ids: torch.Tensor | None) -> torch.Tensor:
+        if ids is None:
+            return torch.empty(0, dtype=torch.long)
+        ids = torch.as_tensor(ids, device="cpu", dtype=torch.long).flatten()
+        keep = torch.zeros(self.num_envs, dtype=torch.bool)
+        out = []
+        for env_id in ids.tolist():
+            env_id = int(env_id)
+            if 0 <= env_id < self.num_envs and not bool(keep[env_id].item()):
+                keep[env_id] = True
+                out.append(env_id)
+        return torch.tensor(out, dtype=torch.long)
+
+    def _make_depth_index_inverse(self, depth_index_inverse: torch.Tensor | None) -> torch.Tensor:
+        if depth_index_inverse is not None:
+            inverse = torch.as_tensor(depth_index_inverse, device="cpu", dtype=torch.long).flatten()
+            if inverse.numel() == self.num_envs:
+                return inverse.clone()
+        inverse = torch.full((self.num_envs,), -1, dtype=torch.long)
+        if self.camera_env_ids.numel() > 0:
+            inverse[self.camera_env_ids] = torch.arange(self.camera_env_ids.numel(), dtype=torch.long)
+        return inverse
+
+    def _valid_real_depth_envs_and_counts(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._dataset is None or self.depth_index_without_crawl_tilt.numel() == 0:
+            empty = torch.empty(0, dtype=torch.long)
+            return empty, empty
+        has_real_depth = self._dataset.get("has_real_depth")
+        valid_envs = []
+        valid_counts = []
+        for env_id in self.depth_index_without_crawl_tilt.tolist():
+            env_id = int(env_id)
+            ep_len = int(self.dataset_size[env_id].item())
+            if ep_len <= 0:
+                continue
+            if has_real_depth is None:
+                valid_count = ep_len
+            else:
+                valid_mask = has_real_depth[env_id, :ep_len].reshape(ep_len, -1)[:, 0] > 0.5
+                valid_count = int(valid_mask.sum().item())
+            if valid_count > 0:
+                valid_envs.append(env_id)
+                valid_counts.append(valid_count)
+        return torch.tensor(valid_envs, dtype=torch.long), torch.tensor(valid_counts, dtype=torch.long)
+
+    def _sample_real_depth_step(self, env_id: int, ep_len: int) -> int:
+        has_real_depth = self._dataset.get("has_real_depth") if self._dataset is not None else None
+        if has_real_depth is None:
+            return int(torch.randint(0, ep_len, (1,)).item())
+        valid_steps = (has_real_depth[env_id, :ep_len].reshape(ep_len, -1)[:, 0] > 0.5).nonzero(
+            as_tuple=False
+        ).flatten()
+        if valid_steps.numel() == 0:
+            return int(torch.randint(0, ep_len, (1,)).item())
+        slot = int(torch.randint(0, valid_steps.numel(), (1,)).item())
+        return int(valid_steps[slot].item())

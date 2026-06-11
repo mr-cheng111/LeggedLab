@@ -14,7 +14,8 @@
 - 保持原始 LeggedLab 的直接环境工作流
 - 便于按个人需求快速修改训练脚本、日志和任务配置
 - 支持使用 `wandb` 作为默认训练日志后端
-- 增加 B2 RGBD / WMP-AMP 训练链路与检查脚本
+- 增加 A1 WMP-AMP 训练链路、原版 WMP 对齐检查与辅助脚本
+- 保留 B2 RGBD / WMP world model 前向检查脚本
 - 增加 RB160W 轮腿机器人任务、混合腿位置/轮速度控制与模型验证脚本
 
 ## Fork Statement
@@ -93,7 +94,7 @@ python legged_lab/scripts/launcher_gui.py
 ## Available Tasks
 
 当前注册任务包括：
-- `a1_amp_flat`
+- `a1_amp_flat`, `a1_wmp_amp_terrain`
 - `h1_flat`, `h1_rough`
 - `g1_flat`, `g1_rough`
 - `gr2_flat`, `gr2_rough`
@@ -160,25 +161,106 @@ python legged_lab/scripts/inspect_rb160w_model.py --task=rb160w_flat --mode=swee
 本仓库沿用 IsaacLab / rsl_rl 的并行训练方式：
 - https://isaac-sim.github.io/IsaacLab/main/source/features/multi_gpu.html
 
-## WMP RSSM World Model Smoke Test
+## A1 WMP-AMP
 
-当前分支已开始移植 WMP（World Model-based Perception for Visual Legged Locomotion）的 RSSM 世界模型到
-`b2_rgbd`。本阶段只提供模型前向检查，不接入 PPO 联训，也不改变现有 `b2_rgbd_*` 训练观测。
+当前主线 WMP 任务是 `a1_wmp_amp_terrain`，目标是在 IsaacLab + rsl_rl 5 中复现 ByteDance WMP 的 A1 地形训练链路。它不是对原仓库的逐文件搬运，而是把原版 WMP 的 actor/critic/RSSM/DepthPredictor/AMP 语义接入当前 LeggedLab 结构。
 
-当前链路：
+核心文件：
+- 任务配置：`legged_lab/envs/a1/a1_config.py`
+- runner：`legged_lab/runners/wmp_amp_runner.py`
+- PPO/AMP 算法：`legged_lab/algorithms/wmp_amp_ppo.py`
+- WMP 模型控制器：`legged_lab/world_models/wmp/controller.py`
+- WMP policy/critic 模型：`legged_lab/models/wmp_mlp_model.py`
+- partial depth camera：`legged_lab/sensors/wmp_partial_tiled_camera.py`
 
-```text
-b2_rgbd Gemini2 depth
-      -> clean/clip/normalize
-      -> resize to 1x64x64 (NCHW)
-      -> convert to WMP image format 64x64x1 (NHWC)
-      -> WMP MultiEncoder
-      -> RSSM obs_step
-      -> deter feature(512) / full feature(1536)
-      -> MultiDecoder image reconstruction smoke test
+训练命令：
+
+```bash
+python legged_lab/scripts/train.py \
+  --task=a1_wmp_amp_terrain \
+  --num_envs=4096 \
+  --headless \
+  --enable_cameras \
+  --runner=wmp_amp \
+  --logger=wandb
 ```
 
-运行检查：
+小规模 smoke：
+
+```bash
+python legged_lab/scripts/train.py \
+  --task=a1_wmp_amp_terrain \
+  --num_envs=2 \
+  --headless \
+  --enable_cameras \
+  --runner=wmp_amp \
+  --max_iterations=1 \
+  --num_steps_per_env=2 \
+  --num_mini_batches=1 \
+  --logger=tensorboard
+```
+
+不开相机的 Python 链路 dry smoke：
+
+```bash
+python legged_lab/scripts/train.py \
+  --task=a1_wmp_amp_terrain \
+  --num_envs=2 \
+  --headless \
+  --runner=wmp_amp \
+  --max_iterations=1 \
+  --num_steps_per_env=2 \
+  --num_mini_batches=1 \
+  --logger=tensorboard
+```
+
+说明：`--runner=wmp_amp` 且不传 `--enable_cameras` 时，`train.py` 会关闭 RGBD camera 并启用 zero-depth fallback；这只适合检查 Python 训练链路，不适合评估 WMP 视觉能力。
+
+### 与原版 WMP 的当前对齐状态
+
+- Actor 主干与原版对齐：`history_encoder(210 -> 35) + command(3) + wmp_encoder(512 -> 32) -> MLP(70 -> 12)`。
+- Critic 输入维度已按原版恢复：`critic_obs(285) + wmp_latent(32) = 317`，第一层对应原版 `critic.0.weight: (512, 317)`。
+- WMP/RSSM 默认使用 `deter=512` 作为 policy feature；`update_interval=5`，因此 WMP action 维度为 `12 * 5 = 60`。
+- WMP proprioception 为 33 维：`ang_vel(3) + projected_gravity(3) + command(3) + joint_pos(12) + joint_vel(12)`。
+- DepthPredictor 使用 forward height map 525 维和 prop 33 维，输出 `64x64x1` WMP depth image。
+- forward height map 已按原版修正为前方 `x=[0,2], y=[-1.2,1.2]` 采样语义；IsaacLab centered grid 通过 `forward_offset=(1,0,0)` 得到 `x'=x+1`。
+- AMP discriminator 输入为 60 维，即 `AMP obs(30) + next AMP obs(30)`；motion 默认来自 `datasets/wmp_mocap_motions/*.txt`。
+
+原版 critic layout 在当前环境中构造为：
+
+```text
+contact_flag(8)
++ contact_force(12)
++ d_gain_scale(12)
++ p_gain_scale(12)
++ com_pos(3)
++ added_mass(1)
++ restitution(1)
++ friction(1)
++ base_lin_vel(3)
++ actor_obs(45)
+= 98
+
+98 + height_scan(187) = critic_obs(285)
+critic_obs(285) + wmp_latent(32) = critic_input(317)
+```
+
+### 仍需注意的差异
+
+当前代码已经修正了旧报告中提到的 `critic 271` 问题；如果看到 `WMP_NETWORK_DESIGN_DIFF_REPORT.txt` 中相关描述，应以当前源码和本 README 为准。
+A1 WMP privileged scale 也已恢复到原版：`contact_force=0.005`、`pd_gains=5.0`、`com_pos=20.0`。
+当前从零训练不要求兼容旧 `.pt`，actor obs、critic obs、WMP prop、AMP obs 和 action 使用 IsaacLab runtime joint order 保持内部自洽。
+
+仍可能影响训练效果的差异：
+- IsaacLab 与原版 IsaacGym/legged_gym 的仿真、接触、相机和资产加载不同。
+- 原版 checkpoint 的 joint order 与当前 runtime joint order 不直接兼容，需要额外转换。
+- WMP replay 由 `WMPFixedEpisodeReplayBuffer` 管理，不是原版 `wm_dataset/wm_buffer` 的逐行实现。
+- partial camera 和 depth buffer 使用 IsaacLab sensor/render 调度，depth 帧时序需要重点检查。
+- AMP motion 经过 `A1CanonicalRetargetAdapter` 映射到当前 env joint order，专家数据均值和当前机器人初态应在启动日志中核对。
+
+### WMP 检查脚本
+
+World model 前向检查：
 
 ```bash
 python legged_lab/scripts/inspect_wmp_world_model.py \
@@ -195,6 +277,24 @@ python legged_lab/scripts/inspect_wmp_world_model.py \
 - `RSSM deter feature shape=(1, 512)`
 - `RSSM full feature shape=(1, 1536)`
 - `decoded image shape=(1, 64, 64, 1)`
+
+地形与边缘 mask 检查：
+
+```bash
+python legged_lab/scripts/inspect_wmp_terrain_generator.py --headless
+python legged_lab/scripts/inspect_wmp_edge_mask.py --task=a1_wmp_amp_terrain --headless --num_envs=4
+```
+
+原版 checkpoint 转换：
+
+```bash
+python legged_lab/scripts/convert_original_wmp_checkpoint.py \
+  /path/to/original/model.pt \
+  --reference /path/to/leggedlab/reference.pt \
+  --output /path/to/converted.pt
+```
+
+转换脚本会迁移 actor、world model、DepthPredictor；critic、optimizer、AMP 状态保留 reference 模板，主要用于推理/播放检查。
 
 ## Troubleshooting
 
@@ -297,54 +397,4 @@ train.py -> get_cfgs -> BaseEnv()
             act -> env.step -> collect rollout
             PPO update
             log/save
-```
-
-## WMP + AMP-PPO
-
-当前已加入 `b2_rgbd_wmp_amp_flat` 和 `b2_rgbd_wmp_amp_terrain`：在 rsl_rl 5 PPO 基础上拼接 WMP RSSM feature，并用 WMP AMP 判别器替换 rollout reward。该版本用于打通训练链路，不承诺复现论文最终性能。
-
-- WMP 输入：Gemini2 `distance_to_image_plane -> clamp/normalize -> 1x64x64 -> NHWC image`，policy feature 默认使用 RSSM `deter=512`。
-- AMP 数据：默认使用 `datasets/wmp_mocap_motions/*.txt`，来源于 ByteDance WMP 的四足 mocap；B2 joint/foot 顺序会在启动时打印，必要时需要进一步做显式 remap。
-- RGB：第一版不使用 RGB，相机任务只启用 depth。
-- DepthPredictor：第一版暂不接入。
-
-快速 dry smoke（不启真实相机，使用零 depth fallback，只用于检查 PPO/AMP/WMP Python 链路）：
-
-```bash
-python legged_lab/scripts/train.py \
-  --task=b2_rgbd_wmp_amp_flat \
-  --num_envs=2 \
-  --headless \
-  --runner=wmp_amp \
-  --max_iterations=1 \
-  --num_steps_per_env=2 \
-  --num_mini_batches=1 \
-  --logger=tensorboard
-```
-
-真实 depth 训练需要开启 camera：
-
-```bash
-python legged_lab/scripts/train.py \
-  --task=b2_rgbd_wmp_amp_flat \
-  --num_envs=64 \
-  --headless \
-  --enable_cameras \
-  --runner=wmp_amp \
-  --max_iterations=10000 \
-  --logger=wandb \
-  --log_project_name=b2_rgbd_wmp_amp \
-  --run_name=wmp_amp_depth_only_v1
-```
-
-地形版 WMP-AMP：
-
-```bash
-python legged_lab/scripts/train.py \
-  --task=b2_rgbd_wmp_amp_terrain \
-  --num_envs=64 \
-  --headless \
-  --enable_cameras \
-  --runner=wmp_amp \
-  --logger=wandb
 ```

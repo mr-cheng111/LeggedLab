@@ -1,0 +1,703 @@
+WMP 原框架与当前项目差异报告
+原始项目路径: /tmp/bytedance_WMP
+当前项目路径: /home/tower/Bags/LeggedLab
+关注范围    : WMP 训练/推理链路、相机/深度链路、AMP/PPO 链路、A1 环境兼容性
+
+生成口径
+--------
+本报告只聚焦 WMP 核心文件，不做全仓库逐文件 diff。
+已排除 .git、__pycache__、logs、wandb、模型权重、运行缓存和其它运行产物。
+
+核心文件规模快照
+----------------
+原版 /tmp/bytedance_WMP/rsl_rl/runners/wmp_runner.py                 588 行
+当前 legged_lab/runners/wmp_amp_runner.py                            302 行
+当前 legged_lab/world_models/wmp/controller.py                       413 行
+原版 /tmp/bytedance_WMP/rsl_rl/modules/actor_critic_wmp.py           240 行
+当前 legged_lab/models/wmp_mlp_model.py                              195 行
+原版 /tmp/bytedance_WMP/dreamer/models.py                            221 行
+当前 legged_lab/world_models/wmp/models.py                           394 行
+原版 /tmp/bytedance_WMP/dreamer/networks.py                          883 行
+当前 legged_lab/world_models/wmp/networks.py                         461 行
+原版 /tmp/bytedance_WMP/rsl_rl/modules/depth_predictor.py            154 行
+当前 legged_lab/world_models/wmp/depth_predictor.py                  122 行
+原版 /tmp/bytedance_WMP/rsl_rl/algorithms/amp_ppo.py                 304 行
+当前 legged_lab/algorithms/wmp_amp_ppo.py                            236 行
+原版 /tmp/bytedance_WMP/legged_gym/envs/a1/a1_amp_config.py          339 行
+当前 legged_lab/envs/a1/a1_config.py                                 384 行
+原版 /tmp/bytedance_WMP/legged_gym/envs/base/legged_robot.py        1655 行
+当前 legged_lab/envs/base/base_env.py                                747 行
+
+
+1. 总览结论
+===========
+
+1. 当前项目不是“只改 checkpoint key 名”的直接移植。
+   原版是 IsaacGym + legged_gym + 旧版 rsl_rl。
+   当前是 IsaacLab + rsl_rl v5 兼容的本地 runner/model/controller。
+
+2. actor 网络的 shape 能对齐，但调用方式不同。
+   原版推理调用:
+     ActorCriticWMP.act_inference(obs, history, wm_feature)
+   当前推理调用:
+     WMPMLPModel(TensorDict，其中包含 policy/critic/wmp 观测组)
+   converted checkpoint 是把原版权重映射进当前这个新包装结构。
+
+3. World Model 架构参数基本对齐原版 Dreamer/WMP 默认值:
+     dyn_deter=512
+     dyn_stoch=32
+     dyn_discrete=32
+     update_interval=5
+     prop_dim=33
+     WMP action_dim=12*5=60
+   但是数据流、replay 实现、在线训练 controller 已经不同。
+
+4. 环境和相机链路是运行时差异最大的部分。
+   原版使用 IsaacGym camera sensor，挂在 A1 URDF trunk 上。
+   当前使用 IsaacLab TiledCameraCfg / rgbd_camera，支持 partial camera envs，
+   并由 IsaacLab sensor update/render 调度控制。
+
+5. converted 原版权重能加载，只说明 actor、world_model、depth_predictor
+   的 tensor shape 和 key 映射成功。
+   这不保证行为一致，因为 joint order、相机外参、history 时序、domain randomization、
+   critic/AMP 状态都可能不同。
+
+6. 如果 converted checkpoint 一运行就“起飞”，最高优先级嫌疑是 joint order。
+   原版 A1 URDF 的关节顺序来自原始 URDF，很可能和 IsaacLab A1 USD 的
+   env.robot.joint_names 不一致。这个问题会同时影响 joint_pos、joint_vel、
+   previous action、WMP prop 和最终 policy action。
+
+
+2. 目录与文件映射
+=================
+
+Runner 与 WMP 编排
+------------------
+原版:
+  /tmp/bytedance_WMP/rsl_rl/runners/wmp_runner.py
+
+当前:
+  legged_lab/runners/wmp_amp_runner.py
+  legged_lab/world_models/wmp/controller.py
+
+含义:
+  原版 WMPRunner 一个类同时负责 rollout、history 构造、World Model step、
+  WMP replay、DepthPredictor 训练、AMP reward 注入、PPO update、checkpoint
+  保存/加载和 inference policy 导出。
+
+  当前拆成两层:
+  - WMPAMPRunner: rsl_rl v5 runner 适配、AMP 构建、PPO 主循环、保存/加载。
+  - WMPTrainingController: RSSM 时序、WMP feature 生成、replay 数据、
+    DepthPredictor 训练、World Model 训练、WMP 模块加载。
+
+
+Policy 模型
+-----------
+原版:
+  /tmp/bytedance_WMP/rsl_rl/modules/actor_critic_wmp.py
+
+当前:
+  legged_lab/models/wmp_mlp_model.py
+
+含义:
+  原版 ActorCriticWMP 是一个整体 actor/critic 模块，显式接收 history 和 wm_feature。
+
+  当前 WMPMLPModel 适配 rsl_rl v5 的 MLPModel 接口，从 TensorDict 观测中
+  内部拆出 history、command 和 wmp feature。
+
+
+World Model / Dreamer
+---------------------
+原版:
+  /tmp/bytedance_WMP/dreamer/configs.yaml
+  /tmp/bytedance_WMP/dreamer/models.py
+  /tmp/bytedance_WMP/dreamer/networks.py
+  /tmp/bytedance_WMP/dreamer/tools.py
+
+当前:
+  legged_lab/world_models/wmp/config.py
+  legged_lab/world_models/wmp/models.py
+  legged_lab/world_models/wmp/networks.py
+  legged_lab/world_models/wmp/tools.py
+  legged_lab/world_models/wmp/preprocess.py
+
+含义:
+  当前保留 WMP RSSM/encoder/decoder 的核心意图，但本地化到
+  legged_lab/world_models/wmp，并增加 preprocess 模块来兼容 IsaacLab 的正深度图。
+
+
+Depth Predictor
+---------------
+原版:
+  /tmp/bytedance_WMP/rsl_rl/modules/depth_predictor.py
+
+当前:
+  legged_lab/world_models/wmp/depth_predictor.py
+
+含义:
+  两者角色相同：用 forward height map 和 proprioception 预测 WMP 64x64 深度图，
+  供没有真实相机的 env 使用。
+
+
+AMP/PPO
+-------
+原版:
+  /tmp/bytedance_WMP/rsl_rl/algorithms/amp_ppo.py
+  /tmp/bytedance_WMP/rsl_rl/algorithms/amp_discriminator.py
+
+当前:
+  legged_lab/algorithms/wmp_amp_ppo.py
+  legged_lab/amp/discriminator.py
+  legged_lab/amp/motion_loader.py
+  legged_lab/amp/retarget.py
+
+含义:
+  当前 AMP 链路适配 rsl_rl v5 的 storage/model API，并加入了面向 env joint order
+  和 canonical AMP observation 的 retarget 支持。
+
+
+A1 环境与 base 环境
+-------------------
+原版:
+  /tmp/bytedance_WMP/legged_gym/envs/a1/a1_amp_config.py
+  /tmp/bytedance_WMP/legged_gym/envs/a1/a1_config.py
+  /tmp/bytedance_WMP/legged_gym/envs/base/legged_robot.py
+  /tmp/bytedance_WMP/legged_gym/envs/base/legged_robot_config.py
+  /tmp/bytedance_WMP/legged_gym/envs/base/observation_buffer.py
+
+当前:
+  legged_lab/envs/a1/a1_config.py
+  legged_lab/envs/base/base_env.py
+  legged_lab/envs/base/base_config.py
+  legged_lab/envs/base/base_env_config.py
+
+含义:
+  原版 env 是 IsaacGym LeggedRobot。
+  当前 env 是 IsaacLab BaseEnv，使用 IsaacLab 的 scene/sensor/event/reward manager。
+
+
+Play / 可视化
+-------------
+原版:
+  原版 play 通过 WMPRunner.get_inference_policy() 返回
+  ActorCriticWMP.act_inference。
+
+当前:
+  legged_lab/scripts/play.py
+  legged_lab/scripts/play_a1_wmp_visualize.sh
+
+含义:
+  当前 play 会构建 WMPAMPRunner，加载当前或 converted checkpoint，
+  将 WMP feature 注入 obs["wmp"]，再调用 rsl_rl v5 policy。
+
+
+3. 文件级差异摘要
+=================
+
+3.1 wmp_runner.py vs wmp_amp_runner.py + controller.py
+-----------------------------------------------------
+原版行为:
+  - 单个 WMPRunner 控制 WMP、AMP、PPO、replay、checkpoint 的大部分逻辑。
+  - 直接从 dreamer/configs.yaml 构建 WorldModel。
+  - 直接构建 ActorCriticWMP。
+  - 显式维护 self.trajectory_history。
+  - 显式维护 wm_action_history。
+  - 使用 env.global_counter % update_interval 决定何时 step RSSM 和存储 WMP 数据。
+  - 使用 wm_buffer 保存当前 episode，再把结束的 episode 复制到 wm_dataset。
+  - 使用 env.depth_index 将真实相机图覆盖到预测图上。
+  - checkpoint key:
+    model_state_dict
+    optimizer_state_dict
+    world_model_dict
+    wm_optimizer_state_dict
+    depth_predictor
+    iter
+    infos
+
+当前行为:
+  - WMPAMPRunner 是 rsl_rl v5 兼容 runner。
+  - WMPTrainingController 管 WMP 时序和 replay。
+  - WorldModel 来自 legged_lab.world_models.wmp.config 默认值。
+  - actor/critic 通过 rsl_rl v5 model factory 构建。
+  - WMP feature 通过 obs["wmp"] 注入 policy。
+  - 环境自己维护 actor observation history buffer。
+  - Controller.observe_before_policy() 在 WMP tick 更新 RSSM。
+  - Controller.after_env_step() 更新 action history、reward accumulator 和 pending WMP obs。
+  - 使用 WMPFixedEpisodeReplayBuffer 替代原版 wm_dataset/wm_buffer 数组。
+  - checkpoint key:
+    actor_state_dict
+    critic_state_dict
+    optimizer_state_dict
+    world_model_state_dict
+    world_model_optimizer_state_dict
+    depth_predictor_state_dict
+    depth_predictor_optimizer_state_dict
+    amp 相关状态
+
+兼容性影响:
+  - tensor shape 可以映射，但 checkpoint 根 key 和 optimizer state 不能直接互换。
+  - 原版 critic 和 optimizer state 与当前 rsl_rl v5 runner 结构不直接兼容。
+  - reset、初始 WMP obs、action history 相对 env.step 的时序可能存在细微差异。
+
+
+3.2 ActorCriticWMP vs WMPMLPModel
+---------------------------------
+原版 ActorCriticWMP:
+  - history_encoder(history) -> latent_dim=35。
+  - command = observations[:, privileged_dim + 6 : privileged_dim + 9]。
+  - wm_feature_encoder(wm_feature) -> wm_latent_dim=32。
+  - actor 输入 = concat(history_latent, command, wm_latent) -> 70 维。
+  - act_inference 返回 actor(concat)。
+  - actor 自己持有 std 参数。
+  - 没有 actor latent obs_normalizer。
+
+当前 WMPMLPModel:
+  - 接收 TensorDict observation groups。
+  - 将 "wmp" 从非 WMP 观测中分离。
+  - 从 actor obs buffer 中重构 history。
+  - _extract_history 在 command_start=6 的位置移除 command 维度。
+  - _extract_command 从最后一个 history step 提取当前 command。
+  - wmp_encoder 将 WMP deter feature 映射到 32 维。
+  - A1 WMP 配置下 actor head 输入仍然是 70 维。
+  - 使用 rsl_rl v5 distribution/normalizer 接口。
+  - converted 原版 actor 会把 obs_normalizer 设置成恒等变换，因为原版没有这个 normalizer。
+
+兼容性影响:
+  - actor 权重经过 key rename 后可以兼容。
+  - 运行时输入必须保持原版语义：joint order、history order、command 位置、
+    WMP feature 类型和 normalization 都要一致。
+  - 如果 policy obs 是 env joint order，而原版 actor 学到的是原版 URDF joint order，
+    shape 检查不会报错，但动作语义会错。
+
+
+3.3 dreamer/configs.yaml vs world_models/wmp/config.py
+-----------------------------------------------------
+已对齐的默认值:
+  - dyn_hidden=512
+  - dyn_deter=512
+  - dyn_stoch=32
+  - dyn_discrete=32
+  - dyn_rec_depth=1
+  - dyn_mean_act=none
+  - dyn_std_act=sigmoid2
+  - dyn_min_std=0.1
+  - unimix_ratio=0.01
+  - initial=learned
+  - encoder CNN image key = image
+  - image size = 64x64x1
+  - A1 WMP 环境层 update_interval=5
+
+当前新增:
+  - Python dataclass 配置，替代 YAML/argparse-only 配置。
+  - replay_device、replay_capacity_episodes、feature_type。
+  - camera_sample_all_envs、camera_num_envs、camera_env_seed、camera_force_tilt_crawl。
+  - 内嵌 DepthPredictorConfig，包含训练配置。
+
+当前 A1 配置中的训练覆盖:
+  - train_start_steps=30000，原版是 10000。
+  - batch_size=32，原版是 16。
+  - model_lr=5e-5，原版是 1e-4。
+
+兼容性影响:
+  - train_start_steps/batch_size/model_lr 不影响 converted 权重推理。
+  - 如果要从 converted 原版权重继续训练，就不是严格的原版训练续跑。
+
+
+3.4 dreamer/models.py、networks.py vs world_models/wmp/models.py、networks.py
+----------------------------------------------------------------------------
+原版:
+  - Dreamer 模块在 dreamer/ 下。
+  - WorldModel._train 负责 encoder、RSSM observe、KL loss、decoder/reward heads、
+    optimizer step 和 metrics。
+  - networks.py 包含更多原版注释和较宽泛的 helper class。
+
+当前:
+  - WorldModel 本地化到 legged_lab/world_models/wmp。
+  - WorldModel 显式暴露 feature_dim 和 deter_dim。
+  - 添加 WMPFixedEpisodeReplayBuffer，用来近似原版 per-env fixed replay。
+  - 添加 CPU replay 支持，以及只从真实 depth 样本训练 DepthPredictor 的采样接口。
+  - 保持 RSSM deter feature 提取逻辑兼容。
+
+兼容性影响:
+  - world model state_dict 可通过系统性 key rename 转换。
+  - replay 和训练行为不是 byte-for-byte 一致。
+  - 如果 replay 采样分布不同，即使架构一致，在线 WMP loss 曲线也可能不同。
+
+
+3.5 depth_predictor.py
+----------------------
+原版:
+  - 位于 rsl_rl/modules/depth_predictor.py。
+  - 由 WMPRunner 使用。
+  - 从原版 wm_dataset 中的真实相机 env 图像训练。
+
+当前:
+  - 位于 legged_lab/world_models/wmp/depth_predictor.py。
+  - 由 WMPTrainingController 使用。
+  - 通过 replay.sample_real_depth() 采样训练。
+  - state dict 可以复制到 depth_predictor_state_dict。
+
+兼容性影响:
+  - shape 兼容，可以转换。
+  - 如果 forward height map、prop joint order 或相机 depth image 语义不同，
+    输入分布仍会变。
+
+
+3.6 amp_ppo.py vs wmp_amp_ppo.py
+--------------------------------
+原版:
+  - AMPPPO 持有 ActorCriticWMP、discriminator、AMP replay buffer 和 PPO storage。
+  - act(obs, critic_obs, amp_obs, history, wm_feature) 显式传入 history/wm_feature。
+  - compute_returns(last_critic_obs, wm_feature) 使用带 WMP feature 的 critic。
+  - velocity prediction target 通过 privileged_dim 从 critic observation 中切片。
+
+当前:
+  - WMPAMPPPO 继承 rsl_rl PPO。
+  - act(obs, amp_obs=None) 委托给 rsl_rl v5 actor call。
+  - actor 通过 obs["wmp"] 接收 WMP feature。
+  - critic 是单独的 rsl_rl v5 model。
+  - AMP components 在 PPO 构建后 attach。
+  - Velocity prediction target 通过 vel_target_start/vel_target_dim 配置。
+
+兼容性影响:
+  - 推理主要使用 actor，因此 converted actor 可以跑。
+  - 训练状态不直接兼容，因为 critic、storage、optimizer param groups、
+    AMP replay/normalizer 结构都不同。
+
+
+3.7 a1_amp_config.py vs a1_config.py
+------------------------------------
+原版 A1 WMP/AMP 配置:
+  - prop_dim=33。
+  - privileged_dim=24+26+3=53。
+  - height_dim=187。
+  - forward_height_dim=525。
+  - num_observations = prop_dim + privileged_dim + height_dim + action_dim。
+  - control stiffness=40、damping=1.0、action_scale=0.25、decimation=4。
+  - depth camera position=[0.27,0,0.03]。
+  - depth camera y_angle=[-5,5]。
+  - horizontal_fov=58。
+  - update_interval=5。
+  - camera_num_envs=1024。
+  - clip_actions=6.0。
+  - domain randomization 包括 friction、mass、link mass、COM、gains、
+    motor strength、action latency 和 push。
+
+当前 A1 WMP/AMP 配置:
+  - 使用 IsaacLab A1_CFG USD asset。
+  - control stiffness=40、damping=1.0、action_scale=0.25、decimation=4。
+  - rgbd_camera partial_camera_num_envs=1024。
+  - rgbd_camera spawn_offset_pos=(0.3,0,0.03)。
+  - rgbd_camera random_pitch_deg=(5,15)。
+  - horizontal_fov_deg=58。
+  - rgbd_camera update_period = sim.dt * sim.decimation * 5。
+  - sim.render_interval = sim.decimation * 5。
+  - actor history length=5。
+  - WMP config 使用 history_dim_per_step=45、command_start=6、command_dim=3。
+  - 增加 terrain curriculum 默认配置和 WMP mixed terrain 集成。
+
+兼容性影响:
+  - camera position/pitch 分布和原版不同。
+  - 当前训练故意使用 5-15 度 pitch，但原版 checkpoint 是在 -5 到 5 度 pitch 下训练。
+  - 原版 checkpoint 推理应优先使用原版 camera settings。
+
+
+3.8 legged_robot.py vs base_env.py
+----------------------------------
+原版 base env:
+  - IsaacGym simulation loop。
+  - 通过 _compute_torques 直接计算 torque。
+  - 使用 gym camera tensors、depth_buffer 和 extras["depth"]。
+  - global_counter 控制 depth update tick。
+  - policy_obs 可来自 obs_buf_history。
+  - privileged_obs_buf 包含 base linear velocity、base angular velocity、
+    projected gravity、commands、dof pos、dof vel、actions、height、
+    以及 privileged randomization/contact 字段。
+  - attach_camera 使用 gymapi.Quat.from_euler_zyx 和 x/y/z angle 配置。
+
+当前 base env:
+  - IsaacLab scene 和 event manager。
+  - 使用 Articulation.set_joint_position_target，而不是直接写 torque tensor。
+  - action_buffer 计算 action delay。
+  - processed_actions = clipped_actions * action_scale + default_joint_pos。
+  - 使用 TiledCamera/RGBD camera sensor 输出 distance_to_image_plane。
+  - get_wmp_proprioception 返回:
+    ang_vel、projected_gravity、command、joint_pos-default、joint_vel-default。
+  - get_wmp_forward_height_map 返回 clip 后的 525 维 forward scan。
+  - AMP observations 为 joint_pos、root_lin_vel_b、root_ang_vel_b、joint_vel。
+
+兼容性影响:
+  - 控制目标公式意图一致，但仿真实现不完全一致。
+  - depth 从 IsaacLab 正的 distance image 来，原版 IsaacGym IMAGE_DEPTH 是负值；
+    preprocess 已处理符号，但 sensor/rasterization 分布仍可能不同。
+  - reset/history 语义在 reset 后的前几步可能不同。
+
+
+4. 行为差异
+===========
+
+4.1 Observation layout
+----------------------
+原版 actor command 提取:
+  command = observations[:, privileged_dim + 6 : privileged_dim + 9]
+
+当前 actor command 提取:
+  command 从最后一个 history step 中提取:
+  current[..., command_start : command_start + command_dim]
+
+当前代码只有在 actor history 每步布局保持如下结构时，才能重构相同语义:
+  ang_vel(3), projected_gravity(3), command(3), joint_pos(12), joint_vel(12), action(12)
+
+
+4.2 History 归属
+----------------
+原版:
+  WMPRunner 自己维护 trajectory_history。
+  env.step 后 append obs_without_command。
+  对 done env 清零 trajectory_history。
+
+当前:
+  BaseEnv 自己维护 actor_obs_buffer。
+  WMPMLPModel 从 obs["policy"] 中抽取 history。
+  Reset 行为取决于 BaseEnv actor_obs_buffer.reset()。
+
+风险:
+  如果 buffer reset 填充值或 step 时序与原版 trajectory_history 不一致，
+  reset 后最初几秒的行为会不同。
+
+
+4.3 WMP feature 时序
+--------------------
+原版:
+  if env.global_counter % wm_update_interval == 0:
+    encode wm_obs
+    obs_step RSSM
+    wm_feature = get_deter_feat(wm_latent)
+
+当前:
+  observe_before_policy() 检查 step_counter % update_interval。
+  如果 pending_obs 为空，会创建 initial WMP obs。
+  在 policy 前 encode pending_obs 并更新 latent。
+  after_env_step() 在 interval 边界准备下一帧 pending_obs。
+
+风险:
+  设计上镜像原版意图，但 counter 来源和初始 pending obs 不是完全相同的状态机。
+
+
+4.4 WMP action history
+----------------------
+原版:
+  wm_action_history 在 policy action 后更新，再 flatten 成 wm_action 并存储。
+
+当前:
+  controller.after_env_step(actions, rewards, dones, wm_obs) 在 env.step 后更新 action_history。
+  在 WMP tick 存储 flatten 后的 action_history。
+
+风险:
+  如果为了兼容原版 policy 做 action reorder，WMP controller 应保存 policy-order actions，
+  而 env.step 应接收 env-order actions。当前 play 兼容 adapter 就遵循这个思路。
+
+
+4.5 Depth image 语义
+--------------------
+原版:
+  IsaacGym IMAGE_DEPTH 是负值。
+  process_depth_image 会 clip 到 [-far, -near]。
+  normalize_depth_image 公式:
+    image = ((-depth) - near) / (far - near) - 0.5
+
+当前:
+  IsaacLab distance_to_image_plane 是正值。
+  preprocess.depth_to_nchw 同时兼容正深度和负深度:
+    depth = where(depth < 0, -depth, depth)
+    image = (clamp(depth, near, far) - near) / (far - near) - 0.5
+
+风险:
+  公式已对齐，但 renderer、clip 行为、camera frame 和图像刷新时序仍可能不同。
+
+
+4.6 Camera extrinsics
+---------------------
+原版:
+  position=[0.27, 0, 0.03]
+  y_angle=[-5, 5]
+  x_angle=[0, 0]
+  z_angle=[0, 0]
+
+当前训练配置:
+  spawn_offset_pos=(0.3, 0, 0.03)
+  random_pitch_deg=(5, 15)
+
+风险:
+  原版 checkpoint 应该先用原版 camera extrinsics 测试，而不是使用当前 5-15 度 pitch
+  的训练分布。
+
+
+4.7 Joint order
+---------------
+原版:
+  A1 action 和 joint observation 顺序来自 IsaacGym 载入原版 A1 URDF 后的 DOF names。
+  原版 URDF 中 actuated joints 按 FR、FL、RR、RL 的腿块顺序出现。
+
+当前:
+  A1 action 和 joint observation 顺序来自 IsaacLab A1 USD 的 env.robot.joint_names。
+
+风险:
+  如果 env.robot.joint_names 与原版 policy order 不一致，actor 会输出 shape 正确但语义错误的动作。
+  这类问题非常容易导致立即失稳或“直接起飞”。
+
+
+4.8 Play 阶段 domain randomization
+----------------------------------
+原版训练:
+  使用 action latency 和 motor strength randomization。
+
+当前 play:
+  play.py 默认会关闭 push，除非显式开启；但 action_delay 和 motor_strength 是否开启取决于配置，
+  除非使用兼容选项关闭。
+
+风险:
+  严格调试原版 checkpoint 时，应先关闭 play-time randomization；
+  等 nominal behavior 正常后再逐步打开。
+
+
+5. Checkpoint 兼容风险
+======================
+
+CRITICAL
+--------
+1. Joint order mismatch。
+   影响 joint_pos、joint_vel、last_action、WMP prop、actor 输出 action 和 WMP action history。
+   shape 检查无法发现这个问题。
+
+2. 当前 converted checkpoint 保留的是 reference critic/AMP/optimizer state。
+   推理可以使用 converted actor + WMP modules，但训练续跑不是严格的原版 checkpoint resume。
+
+
+HIGH
+----
+3. Camera extrinsics 和 pitch 分布不匹配。
+   原版 checkpoint 期望 [0.27,0,0.03] 和 [-5,5] 度 pitch。
+   当前 A1 WMP 训练默认是 (0.3,0,0.03) 和 [5,15] 度 pitch。
+
+4. WMP feature 时序和初始/reset history 差异。
+   Controller 逻辑镜像原版，但不是同一个对象和状态机。
+
+5. IsaacGym vs IsaacLab 仿真器与资产差异。
+   即使 PD scale/stiffness/damping 一样，asset、contact、solver、articulation 实现不同，
+   动力学仍可能不同。
+
+
+MEDIUM
+------
+6. Depth image renderer 分布。
+   归一化公式对齐，但 sensor frame、rasterization、near/far 行为仍可能不同。
+
+7. Terrain generation 和 curriculum。
+   原版 WMP terrain layout 与当前 WMP terrain generator 不保证 byte-identical。
+   当前项目还增加了训练 terrain curriculum。
+
+8. AMP retarget 和 canonical obs 差异。
+   当前 AMP 链路包含 retarget adapter 和 canonical observation 检查。
+
+
+推理低风险、训练高风险
+----------------------
+9. WMP 训练超参数改变。
+   当前 train_start_steps、batch_size、model_lr 为本地稳定性做过调整。
+   这不阻塞推理，但会改变继续训练行为。
+
+
+6. 建议调试顺序
+===============
+
+步骤 1: 验证 converted checkpoint 的 tensor 兼容性。
+  使用 inspect_pt_checkpoint.py，并通过 --compare 对比一个当前原生 checkpoint。
+  期望 actor/world_model/depth_predictor:
+    missing=0
+    unexpected=0
+    shape_mismatch=0
+
+步骤 2: 使用原版兼容 play 模式运行 converted checkpoint。
+  命令:
+    ./legged_lab/scripts/play_a1_wmp_visualize.sh original_wmp_converted model_10000_converted.pt 4 original
+
+  该模式应该:
+    - 使用 policy_joint_order=original_wmp_a1
+    - 关闭 play domain randomization
+    - 使用 camera_offset_pos 0.27 0.0 0.03
+    - 使用 camera_random_pitch_deg -5 5
+
+步骤 3: 在运行时打印并保存 env.robot.joint_names。
+  与原版 A1 URDF joint order 对比。
+  如果不同，原版 policy 推理必须保留 joint order adapter。
+
+步骤 4: 先不测复杂地形。
+  先用 flat 或低难度地形，把 locomotion/control 兼容性和 WMP terrain perception 分开。
+
+步骤 5: 单独检查 policy 稳定性。
+  临时查看 actions 和 processed joint targets。
+  检查是否有 action clipping saturation，或明显的错误腿相位。
+
+步骤 6: 单独检查 WMP/depth。
+  开启 real/prior/posterior depth 可视化，查看 RSSM prior/posterior error。
+  如果平地运动稳定但感知地形失败，下一步重点查 camera/depth 链路。
+
+步骤 7: 稳定推理后再考虑继续训练。
+  除非明确对齐 critic、AMP、optimizer、replay、normalization states，
+  否则不要把 converted checkpoint 当成完整原版训练状态续跑。
+
+
+7. 原始 diff 查看入口
+=====================
+
+Runner 编排:
+  diff -u /tmp/bytedance_WMP/rsl_rl/runners/wmp_runner.py \
+          legged_lab/runners/wmp_amp_runner.py
+
+WMP controller 拆分:
+  sed -n '1,260p' /tmp/bytedance_WMP/rsl_rl/runners/wmp_runner.py
+  sed -n '1,260p' legged_lab/runners/wmp_amp_runner.py
+  sed -n '1,260p' legged_lab/world_models/wmp/controller.py
+
+Actor model:
+  diff -u /tmp/bytedance_WMP/rsl_rl/modules/actor_critic_wmp.py \
+          legged_lab/models/wmp_mlp_model.py
+
+World Model config:
+  diff -u /tmp/bytedance_WMP/dreamer/configs.yaml \
+          legged_lab/world_models/wmp/config.py
+
+World Model code:
+  diff -u /tmp/bytedance_WMP/dreamer/models.py \
+          legged_lab/world_models/wmp/models.py
+  diff -u /tmp/bytedance_WMP/dreamer/networks.py \
+          legged_lab/world_models/wmp/networks.py
+
+Depth predictor:
+  diff -u /tmp/bytedance_WMP/rsl_rl/modules/depth_predictor.py \
+          legged_lab/world_models/wmp/depth_predictor.py
+
+AMP/PPO:
+  diff -u /tmp/bytedance_WMP/rsl_rl/algorithms/amp_ppo.py \
+          legged_lab/algorithms/wmp_amp_ppo.py
+
+A1 config:
+  diff -u /tmp/bytedance_WMP/legged_gym/envs/a1/a1_amp_config.py \
+          legged_lab/envs/a1/a1_config.py
+
+Base env:
+  diff -u /tmp/bytedance_WMP/legged_gym/envs/base/legged_robot.py \
+          legged_lab/envs/base/base_env.py
+
+Checkpoint conversion:
+  sed -n '1,180p' legged_lab/scripts/convert_original_wmp_checkpoint.py
+
+
+最终说明
+========
+
+当前项目可以承载 converted 原版 WMP actor/world_model/depth_predictor 权重，
+但它不是同一个 runtime framework。测试原版 checkpoint 推理时，应首先强制原版 joint order、
+原版 camera extrinsics，以及干净的 play env。继续训练时，应把 converted checkpoint
+视为部分模块迁移，而不是完整训练状态 resume。

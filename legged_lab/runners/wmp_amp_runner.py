@@ -6,6 +6,7 @@ from __future__ import annotations
 import glob
 import os
 import resource
+import statistics
 import time
 
 import torch
@@ -18,6 +19,11 @@ from tensordict import TensorDict
 from legged_lab.algorithms import WMPAMPPPO
 from legged_lab.amp import AMPDiscriminator, AMPLoader, Normalizer
 from legged_lab.world_models.wmp import WMPTrainingController, WorldModel, make_default_wmp_config
+
+try:
+    import wandb
+except ImportError:  # pragma: no cover - wandb is optional.
+    wandb = None
 
 
 class WMPAMPRunner:
@@ -124,6 +130,10 @@ class WMPAMPRunner:
             amp_cfg.get("replay_buffer_size", 100000),
             amp_cfg.get("grad_penalty_coef", 1.0),
         )
+        min_std = self._make_min_action_std(amp_cfg.get("min_normalized_std"))
+        if min_std is not None and hasattr(self.alg, "set_min_action_std"):
+            self.alg.set_min_action_std(min_std)
+            print(f"[INFO] WMP-AMP min action std clamp: {min_std.detach().cpu().tolist()}")
         retarget_name = retarget_adapter.__class__.__name__
         print(
             f"[INFO] WMP-AMP enabled: expert_dim={amp_data.observation_dim}, "
@@ -142,6 +152,30 @@ class WMPAMPRunner:
             canonical_obs_dim=int(amp_cfg.get("canonical_obs_dim", 30)),
             **retarget_kwargs,
         )
+
+    def _make_min_action_std(self, min_normalized_std) -> torch.Tensor | None:
+        if min_normalized_std is None:
+            return None
+        min_normalized_std = torch.as_tensor(min_normalized_std, device=self.device, dtype=torch.float32)
+        if min_normalized_std.numel() != self.env.num_actions:
+            raise ValueError(
+                "amp.min_normalized_std must have one value per action: "
+                f"got {min_normalized_std.numel()}, expected {self.env.num_actions}."
+            )
+        limits = getattr(self.env.robot.data, "soft_joint_pos_limits", None)
+        if limits is None:
+            limits = getattr(self.env.robot.data, "joint_pos_limits", None)
+        if limits is None:
+            raise RuntimeError("Cannot compute WMP min action std: robot joint position limits are unavailable.")
+        limits = limits[0].to(self.device)
+        action_range = limits[:, 1] - limits[:, 0]
+        if action_range.numel() != self.env.num_actions:
+            raise RuntimeError(
+                "Cannot compute WMP min action std: joint limit dim does not match action dim, "
+                f"limits={action_range.numel()}, actions={self.env.num_actions}."
+            )
+        # 原版公式: min_std = min_normalized_std * (dof_upper_limit - dof_lower_limit)。
+        return min_normalized_std * action_range
 
     def _log_amp_joint_stats(self, amp_data: AMPLoader):
         if not hasattr(amp_data, "preloaded_s"):
@@ -192,7 +226,9 @@ class WMPAMPRunner:
 
         for it in range(start_it, total_it):
             curriculum_logs = {}
-            if hasattr(self.env, "update_reward_curriculum"):
+            if hasattr(self.env, "update_training_curriculum"):
+                curriculum_logs = self.env.update_training_curriculum(it)
+            elif hasattr(self.env, "update_reward_curriculum"):
                 curriculum_logs = self.env.update_reward_curriculum(it)
             start = time.time()
             with torch.inference_mode():
@@ -216,21 +252,24 @@ class WMPAMPRunner:
                     next_amp_obs_with_term = next_amp_obs.clone()
                     if reset_env_ids is not None and terminal_amp_states is not None and len(reset_env_ids) > 0:
                         next_amp_obs_with_term[reset_env_ids.to(self.device)] = terminal_amp_states.to(self.device)
-                    amp_rewards, _ = self.alg.discriminator.predict_amp_reward(
+                    amp_total_rewards, _, amp_style_rewards = self.alg.discriminator.predict_amp_reward(
                         amp_obs,
                         next_amp_obs_with_term,
                         task_rewards,
                         normalizer=self.alg.amp_normalizer,
+                        return_details=True,
                     )
+                    rewards = amp_total_rewards
                     self.alg.process_env_step(
                         next_obs,
-                        amp_rewards,
+                        rewards,
                         dones,
                         extras,
                         next_amp_obs=next_amp_obs_with_term,
                         task_rewards=task_rewards,
+                        amp_rewards=amp_style_rewards,
                     )
-                    self.logger.process_env_step(amp_rewards, dones, extras)
+                    self.logger.process_env_step(rewards, dones, extras)
                     obs = next_obs
                 collect_time = time.time() - start
                 start = time.time()
@@ -256,6 +295,7 @@ class WMPAMPRunner:
                 self.alg.get_policy().output_std,
                 None,
             )
+            self._log_wandb_history(it, collect_time, learn_time, loss_dict)
             if self.logger.writer is not None and it % self.cfg["save_interval"] == 0:
                 self.save(os.path.join(self.logger.log_dir, f"model_{it}.pt"))
         if self.logger.writer is not None:
@@ -279,6 +319,25 @@ class WMPAMPRunner:
             stats["gpu_alloc_gb"] = torch.cuda.memory_allocated(device) / (1024.0**3)
             stats["gpu_reserved_gb"] = torch.cuda.memory_reserved(device) / (1024.0**3)
         return stats
+
+    def _log_wandb_history(self, it: int, collect_time: float, learn_time: float, loss_dict: dict):
+        if self.cfg.get("logger") != "wandb" or wandb is None or wandb.run is None:
+            return
+        collection_size = self.cfg["num_steps_per_env"] * self.env.num_envs * self.gpu_world_size
+        payload = {
+            "Perf/total_fps_batched": int(collection_size / max(collect_time + learn_time, 1.0e-8)),
+            "Perf/collection_time_batched": collect_time,
+            "Perf/learning_time_batched": learn_time,
+            "Policy/mean_std_batched": self.alg.get_policy().output_std.mean().item(),
+        }
+        for key, value in loss_dict.items():
+            if isinstance(value, torch.Tensor):
+                value = value.detach().float().mean().item()
+            payload[f"Loss/{key}_batched"] = float(value)
+        if len(getattr(self.logger, "rewbuffer", [])) > 0:
+            payload["Train/mean_reward_batched"] = statistics.mean(self.logger.rewbuffer)
+            payload["Train/mean_episode_length_batched"] = statistics.mean(self.logger.lenbuffer)
+        wandb.log(payload, step=it, commit=True)
 
     def load(self, path: str, load_cfg: dict | None = None, strict: bool = True, map_location: str | None = None):
         loaded = torch.load(path, weights_only=False, map_location=map_location)

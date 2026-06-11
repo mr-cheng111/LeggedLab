@@ -137,7 +137,7 @@ class RB160WFlatEnvCfg(BaseEnvCfg):
         self.scene.terrain_generator = None
         self.scene.height_scanner.enable_height_scan = False
         self.scene.height_scanner.prim_body_name = "base_link"
-        self.scene.gemini2_camera.enable = False
+        self.scene.rgbd_camera.enable = False
         self.scene.env_spacing = 3.0
 
         self.robot.terminate_contacts_body_names = [".*base_link.*"]
