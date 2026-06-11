@@ -952,3 +952,79 @@ critic 维度已经对齐，下一步不是改维度，而是验收字段语义:
        obs normalizer、rsl_rl v5 storage/update 细节。
   4. 记录 reset cause 分布、episode length 分布、AMP policy/expert score 分布。
   5. 如果 trunk contact reset 占比异常，再评估是否为 A1 WMP 增加 current-force 接触终止路径。
+
+
+12.11 2026-06-09 代码级对齐复查结论
+-----------------------------------
+复查范围:
+  - 原版:
+      /tmp/bytedance_WMP/rsl_rl/runners/wmp_runner.py
+      /tmp/bytedance_WMP/rsl_rl/modules/actor_critic_wmp.py
+      /tmp/bytedance_WMP/rsl_rl/modules/depth_predictor.py
+      /tmp/bytedance_WMP/rsl_rl/algorithms/amp_ppo.py
+      /tmp/bytedance_WMP/rsl_rl/algorithms/amp_discriminator.py
+      /tmp/bytedance_WMP/dreamer/configs.yaml
+      /tmp/bytedance_WMP/legged_gym/envs/a1/a1_amp_config.py
+      /tmp/bytedance_WMP/legged_gym/envs/base/legged_robot.py
+  - 当前:
+      legged_lab/models/wmp_mlp_model.py
+      legged_lab/world_models/wmp/{config.py,models.py,controller.py,depth_predictor.py}
+      legged_lab/runners/wmp_amp_runner.py
+      legged_lab/algorithms/wmp_amp_ppo.py
+      legged_lab/amp/discriminator.py
+      legged_lab/envs/a1/a1_config.py
+      legged_lab/envs/base/base_env.py
+      legged_lab/mdp/events.py
+      legged_lab/sensors/wmp_partial_tiled_camera.py
+
+本轮结论:
+  - 未发现新的必须修改代码的 shape / 公式级不一致。
+  - Actor/Critic/DepthPredictor/RSSM 的主要网络 shape 与原版配置继续保持一致。
+  - WMPFixedEpisodeReplayBuffer 当前实现已按原版主要采样语义工作:
+      p_i = dataset_size_i / sum_j(dataset_size_j)
+      batch_length = min(sampled_dataset_size.min(), config.batch_length)
+      end_idx 从 [batch_length, dataset_size_i] 采样
+      out["is_first"][:, 0] = 1，其余帧为 0。
+  - controller.after_env_step() 对 reset 和 WMP tick 同时发生的处理顺序，与原版 runner 对齐:
+      先把已结束 env 的旧 wm_buffer 写入 dataset；
+      再把 wm_is_first/reset env 置 1；
+      当前 tick 只写 not_reset_env_ids = (1 - wm_is_first)。
+    因此 reset 后的新初始状态不会被写入旧 episode。
+  - DepthPredictor 结构与原版一致；当前 forward 额外支持 leading shape reshape，
+    这是 API 兼容增强，不改变单 batch / batch-time 的输出语义。
+  - AMPDiscriminator 的 reward 公式、task_reward_lerp 实际行为、grad penalty 公式与原版一致。
+    原版虽然叫 lerp，但实现为 disc_r + task_r；当前也保留这一行为。
+  - A1 WMP PPO/AMP 关键配置仍与原版一致:
+      entropy_coef=0.01
+      vel_predict_coef=1.0
+      num_learning_epochs=5
+      num_mini_batches=4
+      amp_reward_coef=0.01
+      amp_task_reward_lerp=0.3
+      amp_discr_hidden_dims=[1024,512]
+      min_normalized_std=[0.05,0.02,0.05]*4
+
+确认保留、后续 review 的 API/框架差异:
+  - WMPAMPRunner 基于 rsl_rl v5 actor/critic/storage 接口，不是原版 rsl_rl runner 逐行迁移。
+  - checkpoint key 更完整但不兼容原版；继续保留。
+  - ContactSensor、相机、材质、质量、COM、显式 actuator torque buffer 都来自 IsaacLab/PhysX 路径，
+    不强行改回 IsaacGym 逐行实现。
+  - _refresh_wmp_privileged_buffers_from_sim() 会从 IsaacLab sim 状态同步 privileged buffer。
+    这属于 IsaacLab 后端兜底同步；主要语义仍以 wmp_recording_* EventTerm 的同源采样为准。
+  - action_delay 的插入位置仍是 sim_step 级 position target 选择；原版是在 _compute_torques() 入口选择
+    last_actions/actions。该项继续作为 API/框架差异保留待 review。
+  - AMPReplayBuffer/Normalizer 使用 torch 实现；行为与原版 numpy/cpu 路径相近，但不是逐行相同。
+
+本轮没有改代码的原因:
+  - 已检查到的差异均属于报告中已标注的 IsaacLab/rsl_rl v5/API 迁移差异、日志命名差异或待统计验证项。
+  - 没有发现类似 12.5 中 __init__ 参数缺失、采样边界错误、维度错误这类硬 bug。
+
+验证情况:
+  - 本轮尝试用:
+      source /home/tower/miniconda/etc/profile.d/conda.sh
+      conda activate isaaclab
+      /home/tower/Bags/IsaacLab/isaaclab.sh -p -
+    做轻量配置 import 检查，但当前 shell 环境缺少 pxr 模块，报:
+      ModuleNotFoundError: No module named 'pxr'
+  - 因此本轮只完成静态源码对齐复查，未运行 IsaacLab runtime shape 检查。
+  - 下一次 runtime 验收仍建议沿用报告开头的 headless 检查脚本，并补充 replay/depth 统计打印。

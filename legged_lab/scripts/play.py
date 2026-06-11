@@ -44,7 +44,7 @@ parser.add_argument(
 )
 parser.add_argument("--depth_image_dir", type=str, default=None, help="Directory for saved WMP depth image PNGs.")
 parser.add_argument("--depth_image_save_interval", type=int, default=10, help="Save one depth image every N play steps.")
-parser.add_argument("--show_depth_points", action="store_true", help="Visualize Gemini2 depth hits as red debug points.")
+parser.add_argument("--show_depth_points", action="store_true", help="Visualize RGBD depth hits as red debug points.")
 parser.add_argument("--show_height_scan_points", action="store_true", help="Visualize height scanner ray hits.")
 parser.add_argument("--enable_play_push", action="store_true", help="Keep interval push disturbances enabled during play.")
 parser.add_argument(
@@ -405,20 +405,20 @@ def play():
     if args_cli.num_envs is not None:
         env_cfg.scene.num_envs = args_cli.num_envs
     if args_cli.show_depth_points or args_cli.show_depth_image:
-        env_cfg.scene.gemini2_camera.enable = True
-        env_cfg.scene.gemini2_camera.enable_depth = True
+        env_cfg.scene.rgbd_camera.enable = True
+        env_cfg.scene.rgbd_camera.enable_depth = True
         if args_cli.camera_offset_pos is not None:
-            env_cfg.scene.gemini2_camera.spawn_offset_pos = tuple(args_cli.camera_offset_pos)
+            env_cfg.scene.rgbd_camera.spawn_offset_pos = tuple(args_cli.camera_offset_pos)
         if args_cli.camera_offset_rot is not None:
-            env_cfg.scene.gemini2_camera.spawn_offset_rot = tuple(args_cli.camera_offset_rot)
+            env_cfg.scene.rgbd_camera.spawn_offset_rot = tuple(args_cli.camera_offset_rot)
         if args_cli.camera_random_pitch_deg is not None:
-            env_cfg.scene.gemini2_camera.random_pitch_deg = tuple(args_cli.camera_random_pitch_deg)
+            env_cfg.scene.rgbd_camera.random_pitch_deg = tuple(args_cli.camera_random_pitch_deg)
         if args_cli.camera_fov_deg is not None:
-            env_cfg.scene.gemini2_camera.horizontal_fov_deg = float(args_cli.camera_fov_deg)
+            env_cfg.scene.rgbd_camera.horizontal_fov_deg = float(args_cli.camera_fov_deg)
         if args_cli.camera_disable_random_rotation:
-            env_cfg.scene.gemini2_camera.randomize_rotation = False
-        if env_cfg.scene.gemini2_camera.partial_camera:
-            env_cfg.scene.gemini2_camera.partial_camera_num_envs = env_cfg.scene.num_envs
+            env_cfg.scene.rgbd_camera.randomize_rotation = False
+        if env_cfg.scene.rgbd_camera.partial_camera:
+            env_cfg.scene.rgbd_camera.partial_camera_num_envs = env_cfg.scene.num_envs
 
     agent_cfg = update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.seed = agent_cfg.seed
@@ -500,10 +500,10 @@ def play():
         keyboard = Keyboard(env)  # noqa:F841
 
     obs = env.get_observations()
-    depth_camera = env.scene.sensors.get("gemini2_depth_camera") if args_cli.show_depth_points or args_cli.show_depth_image else None
+    depth_camera = env.scene.sensors.get("rgbd_camera") if args_cli.show_depth_points or args_cli.show_depth_image else None
     depth_draw = _acquire_debug_draw_interface() if args_cli.show_depth_points else None
     if depth_camera is not None:
-        # TiledCamera 默认返回初始化时的相机位姿；红点需要跟随机器人上的 Gemini2，
+        # TiledCamera 默认返回初始化时的相机位姿；红点需要跟随机器人上的 RGBD，
         # 因此播放调试时开启最新位姿更新。
         depth_camera.cfg.update_latest_camera_pose = True
         camera_ids = getattr(depth_camera, "camera_env_ids", None)
@@ -528,8 +528,8 @@ def play():
             if depth_camera is not None and args_cli.show_depth_image:
                 depth_window_available = _handle_wmp_depth_image(
                     depth_camera,
-                    near=env_cfg.scene.gemini2_camera.depth_near,
-                    far=env_cfg.scene.gemini2_camera.depth_far,
+                    near=env_cfg.scene.rgbd_camera.depth_near,
+                    far=env_cfg.scene.rgbd_camera.depth_far,
                     mode=args_cli.depth_image_mode,
                     output_dir=depth_image_dir,
                     step=depth_image_step,
@@ -540,8 +540,8 @@ def play():
             if depth_camera is not None and depth_draw is not None:
                 depth_points, depth_origins = _depth_to_hit_points(
                     depth_camera,
-                    near=env_cfg.scene.gemini2_camera.depth_near,
-                    far=env_cfg.scene.gemini2_camera.depth_far,
+                    near=env_cfg.scene.rgbd_camera.depth_near,
+                    far=env_cfg.scene.rgbd_camera.depth_far,
                     stride=args_cli.depth_point_stride,
                     max_points=args_cli.depth_point_max,
                     forward_min=args_cli.depth_point_forward_min,

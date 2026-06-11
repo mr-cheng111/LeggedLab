@@ -6,6 +6,7 @@ from __future__ import annotations
 import glob
 import os
 import resource
+import statistics
 import time
 
 import torch
@@ -18,6 +19,11 @@ from tensordict import TensorDict
 from legged_lab.algorithms import WMPAMPPPO
 from legged_lab.amp import AMPDiscriminator, AMPLoader, Normalizer
 from legged_lab.world_models.wmp import WMPTrainingController, WorldModel, make_default_wmp_config
+
+try:
+    import wandb
+except ImportError:  # pragma: no cover - wandb is optional.
+    wandb = None
 
 
 class WMPAMPRunner:
@@ -220,7 +226,9 @@ class WMPAMPRunner:
 
         for it in range(start_it, total_it):
             curriculum_logs = {}
-            if hasattr(self.env, "update_reward_curriculum"):
+            if hasattr(self.env, "update_training_curriculum"):
+                curriculum_logs = self.env.update_training_curriculum(it)
+            elif hasattr(self.env, "update_reward_curriculum"):
                 curriculum_logs = self.env.update_reward_curriculum(it)
             start = time.time()
             with torch.inference_mode():
@@ -284,6 +292,7 @@ class WMPAMPRunner:
                 self.alg.get_policy().output_std,
                 None,
             )
+            self._log_wandb_history(it, collect_time, learn_time, loss_dict)
             if self.logger.writer is not None and it % self.cfg["save_interval"] == 0:
                 self.save(os.path.join(self.logger.log_dir, f"model_{it}.pt"))
         if self.logger.writer is not None:
@@ -307,6 +316,25 @@ class WMPAMPRunner:
             stats["gpu_alloc_gb"] = torch.cuda.memory_allocated(device) / (1024.0**3)
             stats["gpu_reserved_gb"] = torch.cuda.memory_reserved(device) / (1024.0**3)
         return stats
+
+    def _log_wandb_history(self, it: int, collect_time: float, learn_time: float, loss_dict: dict):
+        if self.cfg.get("logger") != "wandb" or wandb is None or wandb.run is None:
+            return
+        collection_size = self.cfg["num_steps_per_env"] * self.env.num_envs * self.gpu_world_size
+        payload = {
+            "Perf/total_fps_batched": int(collection_size / max(collect_time + learn_time, 1.0e-8)),
+            "Perf/collection_time_batched": collect_time,
+            "Perf/learning_time_batched": learn_time,
+            "Policy/mean_std_batched": self.alg.get_policy().output_std.mean().item(),
+        }
+        for key, value in loss_dict.items():
+            if isinstance(value, torch.Tensor):
+                value = value.detach().float().mean().item()
+            payload[f"Loss/{key}_batched"] = float(value)
+        if len(getattr(self.logger, "rewbuffer", [])) > 0:
+            payload["Train/mean_reward_batched"] = statistics.mean(self.logger.rewbuffer)
+            payload["Train/mean_episode_length_batched"] = statistics.mean(self.logger.lenbuffer)
+        wandb.log(payload, step=it, commit=True)
 
     def load(self, path: str, load_cfg: dict | None = None, strict: bool = True, map_location: str | None = None):
         loaded = torch.load(path, weights_only=False, map_location=map_location)

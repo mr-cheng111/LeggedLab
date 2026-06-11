@@ -419,19 +419,19 @@ class B2RGBDFlatEnvCfg(B2FlatEnvCfg):
         super().__post_init__()
         self.scene.robot = B2_CFG
         self.scene.height_scanner.prim_body_name = "base_link"
-        self.scene.gemini2_camera.enable = True
-        self.scene.gemini2_camera.spawn_prim_path = "base_link/wmp_depth_camera"
-        self.scene.gemini2_camera.model_name = "wmp_front_depth"
-        self.scene.gemini2_camera.camera_model = "pinhole"
-        self.scene.gemini2_camera.spawn_offset_pos = (0.27, 0.0, 0.03)
-        self.scene.gemini2_camera.spawn_offset_rot = (1.0, 0.0, 0.0, 0.0)
-        self.scene.gemini2_camera.width = 64
-        self.scene.gemini2_camera.height = 64
-        self.scene.gemini2_camera.depth_near = 0.0
-        self.scene.gemini2_camera.depth_far = 2.0
-        self.scene.gemini2_camera.horizontal_fov_deg = 58.0
-        self.scene.gemini2_camera.randomize_rotation = True
-        self.scene.gemini2_camera.random_pitch_deg = (-5.0, 5.0)
+        self.scene.rgbd_camera.enable = True
+        self.scene.rgbd_camera.spawn_prim_path = "base_link/wmp_depth_camera"
+        self.scene.rgbd_camera.model_name = "wmp_front_depth"
+        self.scene.rgbd_camera.camera_model = "pinhole"
+        self.scene.rgbd_camera.spawn_offset_pos = (0.27, 0.0, 0.03)
+        self.scene.rgbd_camera.spawn_offset_rot = (1.0, 0.0, 0.0, 0.0)
+        self.scene.rgbd_camera.width = 64
+        self.scene.rgbd_camera.height = 64
+        self.scene.rgbd_camera.depth_near = 0.0
+        self.scene.rgbd_camera.depth_far = 2.0
+        self.scene.rgbd_camera.horizontal_fov_deg = 58.0
+        self.scene.rgbd_camera.randomize_rotation = True
+        self.scene.rgbd_camera.random_pitch_deg = (-5.0, 5.0)
 
 
 @configclass
@@ -453,10 +453,10 @@ class B2RGBDStandEnvCfg(B2RGBDFlatEnvCfg):
         self.sim.physx.gpu_max_rigid_patch_count = 2 * 2**15
         self.scene.terrain_type = "plane"
         self.scene.terrain_generator = None
-        self.scene.gemini2_camera.enable = False
-        self.scene.gemini2_camera.enable_rgb = False
-        self.scene.gemini2_camera.enable_depth = False
-        self.scene.gemini2_camera.allow_missing_depth_fallback = True
+        self.scene.rgbd_camera.enable = False
+        self.scene.rgbd_camera.enable_rgb = False
+        self.scene.rgbd_camera.enable_depth = False
+        self.scene.rgbd_camera.allow_missing_depth_fallback = True
         self.normalization.obs_scales.lin_vel = 1.0
         self.normalization.obs_scales.ang_vel = 0.25
         self.normalization.obs_scales.projected_gravity = 1.0
@@ -529,10 +529,10 @@ class B2RGBDSlowWalkEnvCfg(B2RGBDFlatEnvCfg):
         self.sim.physx.gpu_max_rigid_patch_count = 2 * 2**15
         self.scene.terrain_type = "plane"
         self.scene.terrain_generator = None
-        self.scene.gemini2_camera.enable = False
-        self.scene.gemini2_camera.enable_rgb = False
-        self.scene.gemini2_camera.enable_depth = False
-        self.scene.gemini2_camera.allow_missing_depth_fallback = True
+        self.scene.rgbd_camera.enable = False
+        self.scene.rgbd_camera.enable_rgb = False
+        self.scene.rgbd_camera.enable_depth = False
+        self.scene.rgbd_camera.allow_missing_depth_fallback = True
         self.normalization.obs_scales.lin_vel = 1.0
         self.normalization.obs_scales.ang_vel = 0.25
         self.normalization.obs_scales.projected_gravity = 1.0
@@ -599,7 +599,7 @@ class B2RGBDRoughEnvCfg(B2RoughEnvCfg):
         super().__post_init__()
         self.scene.robot = B2_CFG
         self.scene.height_scanner.prim_body_name = "base_link"
-        self.scene.gemini2_camera.enable = True
+        self.scene.rgbd_camera.enable = True
 
 
 @configclass
@@ -617,16 +617,16 @@ class B2RGBDWMPAMPFlatEnvCfg(B2RGBDFlatEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         wmp_update_interval = 5
-        self.scene.gemini2_camera.enable = True
-        self.scene.gemini2_camera.enable_rgb = False
-        self.scene.gemini2_camera.enable_depth = True
-        self.scene.gemini2_camera.partial_camera = True
-        self.scene.gemini2_camera.partial_camera_num_envs = 1024
-        self.scene.gemini2_camera.partial_camera_seed = 42
-        self.scene.gemini2_camera.partial_camera_force_tilt_crawl = True
-        self.scene.gemini2_camera.model_name = "wmp_front_depth"
-        self.scene.gemini2_camera.update_period = self.sim.dt * self.sim.decimation * wmp_update_interval
-        self.scene.gemini2_camera.allow_missing_depth_fallback = True
+        self.scene.rgbd_camera.enable = True
+        self.scene.rgbd_camera.enable_rgb = False
+        self.scene.rgbd_camera.enable_depth = True
+        self.scene.rgbd_camera.partial_camera = True
+        self.scene.rgbd_camera.partial_camera_num_envs = 1024
+        self.scene.rgbd_camera.partial_camera_seed = 42
+        self.scene.rgbd_camera.partial_camera_force_tilt_crawl = True
+        self.scene.rgbd_camera.model_name = "wmp_front_depth"
+        self.scene.rgbd_camera.update_period = self.sim.dt * self.sim.decimation * wmp_update_interval
+        self.scene.rgbd_camera.allow_missing_depth_fallback = True
         self.sim.render_interval = self.sim.decimation * wmp_update_interval
 
 

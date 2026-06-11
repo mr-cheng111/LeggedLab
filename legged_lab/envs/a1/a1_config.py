@@ -381,9 +381,9 @@ class A1WMPAMPTerrainAgentCfg(A1AMPFlatAgentCfg):
         self.policy.actor_hidden_dims = [256, 128, 64]
         self.policy.critic_hidden_dims = [512, 256, 128]
         self.algorithm.class_name = "legged_lab.algorithms.wmp_amp_ppo:WMPAMPPPO"
-        self.algorithm.learning_rate = 3.0e-4
-        self.algorithm.schedule = "fixed"
-        self.algorithm.desired_kl = 0.006
+        self.algorithm.learning_rate = 1.0e-3
+        self.algorithm.schedule = "adaptive"
+        self.algorithm.desired_kl = 0.01
         self.algorithm.entropy_coef = 0.01
         self.algorithm.num_learning_epochs = 5
         self.algorithm.num_mini_batches = 4

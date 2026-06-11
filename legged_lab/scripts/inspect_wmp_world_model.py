@@ -10,7 +10,7 @@ from isaaclab.app import AppLauncher
 
 from legged_lab.utils import task_registry
 
-parser = argparse.ArgumentParser(description="Inspect WMP RSSM world model with b2_rgbd Gemini2 depth.")
+parser = argparse.ArgumentParser(description="Inspect WMP RSSM world model with b2_rgbd RGBD depth.")
 parser.add_argument("--task", type=str, default="b2_rgbd_rough", help="Task name.")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments.")
 parser.add_argument("--steps", type=int, default=5, help="Number of zero-action warmup steps.")
@@ -40,7 +40,7 @@ def main():
     env_cfg.commands.ranges.lin_vel_y = (0.0, 0.0)
     env_cfg.commands.ranges.ang_vel_z = (0.0, 0.0)
     env_cfg.commands.ranges.heading = (0.0, 0.0)
-    env_cfg.scene.gemini2_camera.enable = True
+    env_cfg.scene.rgbd_camera.enable = True
     if args_cli.device is not None:
         env_cfg.device = args_cli.device
 
@@ -50,7 +50,7 @@ def main():
     exit_code = 1
     try:
         env.sim.set_camera_view(eye=[2.8, -2.8, 1.6], target=[0.0, 0.0, 0.45])
-        depth_camera = env.scene.sensors["gemini2_depth_camera"]
+        depth_camera = env.scene.sensors["rgbd_camera"]
 
         depth = None
         for step_idx in range(args_cli.steps):
@@ -61,19 +61,19 @@ def main():
 
         assert depth is not None
         wm_device = args_cli.wm_device or env.device
-        _log(f"preprocessing Gemini2 depth on device={wm_device}")
+        _log(f"preprocessing RGBD depth on device={wm_device}")
         prop = env.get_wmp_proprioception().to(wm_device)
         forward_height_map = env.get_wmp_forward_height_map().to(wm_device)
         camera_env_ids = env.get_depth_camera_env_ids()
         depth_nchw = depth_to_nchw(
             depth.to(wm_device),
-            near=env_cfg.scene.gemini2_camera.depth_near,
-            far=env_cfg.scene.gemini2_camera.depth_far,
+            near=env_cfg.scene.rgbd_camera.depth_near,
+            far=env_cfg.scene.rgbd_camera.depth_far,
         )
         camera_image = depth_to_wmp_image(
             depth.to(wm_device),
-            near=env_cfg.scene.gemini2_camera.depth_near,
-            far=env_cfg.scene.gemini2_camera.depth_far,
+            near=env_cfg.scene.rgbd_camera.depth_near,
+            far=env_cfg.scene.rgbd_camera.depth_far,
         )
         if camera_image.shape[0] == env.num_envs:
             image = camera_image

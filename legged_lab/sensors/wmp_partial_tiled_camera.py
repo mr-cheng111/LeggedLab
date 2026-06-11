@@ -208,13 +208,11 @@ class WMPPartialTiledCamera(TiledCamera):
         if camera_ids.numel() == 0:
             raise ValueError("WMPPartialTiledCamera requires at least one camera env id.")
         ordered_num_envs = int(cfg.full_num_envs or int(camera_ids.max().item()) + 1)
-        self.camera_env_ids = _ordered_unique_valid(camera_ids, ordered_num_envs, torch.device("cpu"))
+        self.requested_camera_env_ids = _ordered_unique_valid(camera_ids, ordered_num_envs, torch.device("cpu"))
+        self.camera_env_ids = self.requested_camera_env_ids.clone()
         full_num_envs = int(cfg.full_num_envs or (int(self.camera_env_ids.max().item()) + 1))
         self.full_num_envs = full_num_envs
-        self.camera_env_mask = torch.zeros(full_num_envs, dtype=torch.bool)
-        self.camera_env_mask[self.camera_env_ids] = True
-        self.camera_env_id_inverse = torch.full((full_num_envs,), -1, dtype=torch.long)
-        self.camera_env_id_inverse[self.camera_env_ids] = torch.arange(self.camera_env_ids.numel(), dtype=torch.long)
+        self._set_camera_env_ids(self.camera_env_ids)
         self._wmp_full_prim_path = cfg.prim_path
         self._wmp_subset_prim_path = self._camera_subset_prim_path(cfg.prim_path, self.camera_env_ids)
         spawn_cfg = cfg.spawn
@@ -235,12 +233,31 @@ class WMPPartialTiledCamera(TiledCamera):
         if len(actual_env_ids) == self._view.count:
             actual = torch.tensor(actual_env_ids, dtype=torch.long)
             if actual.numel() != self.camera_env_ids.numel() or not torch.equal(actual, self.camera_env_ids):
-                requested_head = self.camera_env_ids[:16].tolist()
-                actual_head = actual[:16].tolist()
-                raise RuntimeError(
-                    "WMPPartialTiledCamera image slot order must match depth_index exactly. "
-                    f"requested_head={requested_head}, actual_head={actual_head}"
-                )
+                requested_set = set(self.camera_env_ids.tolist())
+                actual_set = set(actual.tolist())
+                if actual.numel() == self.camera_env_ids.numel() and requested_set == actual_set:
+                    print(
+                        "[WARN] WMPPartialTiledCamera image slot order differs from requested depth_index; "
+                        "using actual IsaacLab camera view order for depth_index mapping. "
+                        f"requested_head={self.camera_env_ids[:16].tolist()}, actual_head={actual[:16].tolist()}"
+                    )
+                    self._set_camera_env_ids(actual)
+                else:
+                    missing = sorted(requested_set - actual_set)[:16]
+                    extra = sorted(actual_set - requested_set)[:16]
+                    raise RuntimeError(
+                        "WMPPartialTiledCamera camera env set mismatch. "
+                        f"requested_count={self.camera_env_ids.numel()}, actual_count={actual.numel()}, "
+                        f"requested_head={self.camera_env_ids[:16].tolist()}, actual_head={actual[:16].tolist()}, "
+                        f"missing_head={missing}, extra_head={extra}"
+                    )
+
+    def _set_camera_env_ids(self, camera_env_ids: torch.Tensor):
+        self.camera_env_ids = torch.as_tensor(camera_env_ids, dtype=torch.long, device="cpu").flatten().clone()
+        self.camera_env_mask = torch.zeros(self.full_num_envs, dtype=torch.bool)
+        self.camera_env_mask[self.camera_env_ids] = True
+        self.camera_env_id_inverse = torch.full((self.full_num_envs,), -1, dtype=torch.long)
+        self.camera_env_id_inverse[self.camera_env_ids] = torch.arange(self.camera_env_ids.numel(), dtype=torch.long)
 
     def _spawn_partial_cameras_from_cfg(self, cfg: WMPPartialTiledCameraCfg, spawn_cfg):
         stage = get_current_stage()

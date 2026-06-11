@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Gemini2 depth 到 WMP image 输入的预处理。"""
+"""RGBD depth 到 WMP image 输入的预处理。"""
 
 import torch
 from torch.nn import functional as F
@@ -39,5 +39,5 @@ def depth_to_wmp_image(
     far: float = 2.0,
     image_size: tuple[int, int] = (64, 64),
 ) -> torch.Tensor:
-    """将 Gemini2 depth 转换为 WMP 内部 NHWC 图像 B,64,64,1。"""
+    """将 RGBD depth 转换为 WMP 内部 NHWC 图像 B,64,64,1。"""
     return depth_to_nchw(depth, near=near, far=far, image_size=image_size).permute(0, 2, 3, 1).contiguous()

@@ -68,27 +68,27 @@ def main():
     if args_cli.device is not None:
         env_cfg.device = args_cli.device
 
-    env_cfg.scene.gemini2_camera.enable = True
-    env_cfg.scene.gemini2_camera.enable_rgb = True
-    env_cfg.scene.gemini2_camera.enable_depth = True
-    env_cfg.scene.gemini2_camera.partial_camera = False
+    env_cfg.scene.rgbd_camera.enable = True
+    env_cfg.scene.rgbd_camera.enable_rgb = True
+    env_cfg.scene.rgbd_camera.enable_depth = True
+    env_cfg.scene.rgbd_camera.partial_camera = False
     if args_cli.camera_model is not None:
-        env_cfg.scene.gemini2_camera.camera_model = args_cli.camera_model
+        env_cfg.scene.rgbd_camera.camera_model = args_cli.camera_model
     if args_cli.camera_name is not None:
-        env_cfg.scene.gemini2_camera.model_name = args_cli.camera_name
+        env_cfg.scene.rgbd_camera.model_name = args_cli.camera_name
     if args_cli.camera_prim_path is not None:
-        env_cfg.scene.gemini2_camera.spawn_prim_path = args_cli.camera_prim_path
+        env_cfg.scene.rgbd_camera.spawn_prim_path = args_cli.camera_prim_path
     if args_cli.camera_offset_pos is not None:
-        env_cfg.scene.gemini2_camera.spawn_offset_pos = tuple(args_cli.camera_offset_pos)
+        env_cfg.scene.rgbd_camera.spawn_offset_pos = tuple(args_cli.camera_offset_pos)
     if args_cli.camera_offset_rot is not None:
-        env_cfg.scene.gemini2_camera.spawn_offset_rot = tuple(args_cli.camera_offset_rot)
-    camera_prim_path = "{ENV_REGEX_NS}/Robot/" + env_cfg.scene.gemini2_camera.spawn_prim_path.strip("/")
+        env_cfg.scene.rgbd_camera.spawn_offset_rot = tuple(args_cli.camera_offset_rot)
+    camera_prim_path = "{ENV_REGEX_NS}/Robot/" + env_cfg.scene.rgbd_camera.spawn_prim_path.strip("/")
 
     env_class = task_registry.get_task_class(args_cli.task)
     env = env_class(env_cfg, args_cli.headless)
     env.sim.set_camera_view(eye=[2.8, -2.8, 1.6], target=[0.0, 0.0, 0.45])
-    depth_camera = env.scene.sensors["gemini2_depth_camera"]
-    rgb_camera = env.scene.sensors.get("gemini2_rgb_camera", depth_camera)
+    depth_camera = env.scene.sensors["rgbd_camera"]
+    rgb_camera = env.scene.sensors.get("rgbd_camera", depth_camera)
     print(f"[INFO] reading spawned RGBD camera prim: {camera_prim_path}")
 
     rgb = None
@@ -119,8 +119,8 @@ def main():
         save_images_to_file(
             _normalize_depth(
                 depth,
-                env_cfg.scene.gemini2_camera.depth_near,
-                env_cfg.scene.gemini2_camera.depth_far,
+                env_cfg.scene.rgbd_camera.depth_near,
+                env_cfg.scene.rgbd_camera.depth_far,
             ),
             str(depth_path),
         )

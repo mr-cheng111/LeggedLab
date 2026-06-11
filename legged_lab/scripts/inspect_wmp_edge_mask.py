@@ -29,10 +29,10 @@ def main():
     env_cfg.scene.terrain_type = "generator"
     env_cfg.scene.terrain_generator = WMP_TERRAIN_CFGS[args_cli.wmp_terrain]
     env_cfg.scene.max_init_terrain_level = 0
-    env_cfg.scene.gemini2_camera.enable = False
-    env_cfg.scene.gemini2_camera.enable_rgb = False
-    env_cfg.scene.gemini2_camera.enable_depth = False
-    env_cfg.scene.gemini2_camera.allow_missing_depth_fallback = True
+    env_cfg.scene.rgbd_camera.enable = False
+    env_cfg.scene.rgbd_camera.enable_rgb = False
+    env_cfg.scene.rgbd_camera.enable_depth = False
+    env_cfg.scene.rgbd_camera.allow_missing_depth_fallback = True
     env_cfg.noise.add_noise = False
 
     if args_cli.device is not None:

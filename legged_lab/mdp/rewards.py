@@ -421,6 +421,34 @@ def feet_stumble(env: BaseEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
     )
 
 
+def wmp_feet_stumble(env: BaseEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+    """WMP 原版 `feet_stumble` 奖励。
+
+    原版公式:
+        rew = any(||F_xy||_2 > 4 * |F_z|)
+        rew *= terrain_levels > 3
+        rew[非 gap/pit 段地形] = 0
+
+    其中 `gap_start_col` 和 `climb_end_col` 对应原版按 env 连续切片的
+    `[gap_start_idx, pit_end_idx)` 地形段。当前用 terrain_types 的列号 gate
+    表达同一语义。
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    forces = contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids]
+    rew = torch.any(torch.norm(forces[..., :2], dim=-1) > 4.0 * torch.abs(forces[..., 2]), dim=1)
+
+    terrain_levels = getattr(env, "terrain_levels", None)
+    terrain_types = getattr(env, "terrain_types", None)
+    if terrain_levels is not None:
+        rew &= terrain_levels > 3
+    if terrain_types is not None:
+        type_gate = (terrain_types >= getattr(env, "gap_start_col", 0)) & (
+            terrain_types < getattr(env, "climb_end_col", terrain_types.max().item() + 1)
+        )
+        rew &= type_gate
+    return rew.float()
+
+
 def feet_too_near_humanoid(
     env: BaseEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"), threshold: float = 0.2
 ) -> torch.Tensor:
