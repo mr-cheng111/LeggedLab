@@ -42,6 +42,15 @@ def quat_mul_wxyz(lhs: np.ndarray, rhs: np.ndarray) -> np.ndarray:
     )
 
 
+def quat_rotate_wxyz(quat: np.ndarray, vector: np.ndarray) -> np.ndarray:
+    """Rotate vectors by normalized wxyz quaternions."""
+    quat = normalize_quat_wxyz(quat)
+    vector = np.asarray(vector, dtype=np.float64)
+    quat_vector = quat[..., 1:4]
+    twice_cross = 2.0 * np.cross(quat_vector, vector)
+    return vector + quat[..., 0:1] * twice_cross + np.cross(quat_vector, twice_cross)
+
+
 def finite_difference(values: np.ndarray, dt: float) -> np.ndarray:
     values = np.asarray(values, dtype=np.float64)
     if values.shape[0] < 2:
