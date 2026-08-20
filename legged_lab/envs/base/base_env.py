@@ -20,11 +20,10 @@ from isaaclab.managers import EventManager, RewardManager
 from isaaclab.managers.scene_entity_cfg import SceneEntityCfg
 from isaaclab.scene import InteractiveScene
 from isaaclab.sensors import ContactSensor, RayCaster, TiledCameraCfg
-from isaaclab.sim import SimulationContext
+from isaaclab.sim import PhysxCfg, SimulationContext
 from isaaclab.utils.math import quat_from_angle_axis, quat_mul
 from isaaclab.utils.buffers import CircularBuffer, DelayBuffer
 from isaaclab.utils.seed import configure_seed
-from isaaclab_physx.physics import PhysxCfg
 from rsl_rl.env import VecEnv
 from tensordict import TensorDict
 
@@ -59,7 +58,7 @@ class BaseEnv(VecEnv):
             device=cfg.device,
             dt=cfg.sim.dt,
             render_interval=self.render_interval,
-            physics=PhysxCfg(gpu_max_rigid_patch_count=cfg.sim.physx.gpu_max_rigid_patch_count),
+            physx=PhysxCfg(gpu_max_rigid_patch_count=cfg.sim.physx.gpu_max_rigid_patch_count),
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 friction_combine_mode="multiply",
                 restitution_combine_mode="multiply",
