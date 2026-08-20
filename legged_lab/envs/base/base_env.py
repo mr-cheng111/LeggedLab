@@ -10,7 +10,6 @@
 # with modifications by Legged Lab Project (BSD-3-Clause license).
 
 import isaaclab.sim as sim_utils
-import isaacsim.core.utils.torch as torch_utils  # type: ignore
 import math
 import numpy as np
 import torch
@@ -21,9 +20,11 @@ from isaaclab.managers import EventManager, RewardManager
 from isaaclab.managers.scene_entity_cfg import SceneEntityCfg
 from isaaclab.scene import InteractiveScene
 from isaaclab.sensors import ContactSensor, RayCaster, TiledCameraCfg
-from isaaclab.sim import PhysxCfg, SimulationContext
+from isaaclab.sim import SimulationContext
 from isaaclab.utils.math import quat_from_angle_axis, quat_mul
 from isaaclab.utils.buffers import CircularBuffer, DelayBuffer
+from isaaclab.utils.seed import configure_seed
+from isaaclab_physx.physics import PhysxCfg
 from rsl_rl.env import VecEnv
 from tensordict import TensorDict
 
@@ -58,7 +59,7 @@ class BaseEnv(VecEnv):
             device=cfg.device,
             dt=cfg.sim.dt,
             render_interval=self.render_interval,
-            physx=PhysxCfg(gpu_max_rigid_patch_count=cfg.sim.physx.gpu_max_rigid_patch_count),
+            physics=PhysxCfg(gpu_max_rigid_patch_count=cfg.sim.physx.gpu_max_rigid_patch_count),
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 friction_combine_mode="multiply",
                 restitution_combine_mode="multiply",
@@ -476,7 +477,11 @@ class BaseEnv(VecEnv):
                 ).item()
             )
 
-        is_rendering = self.sim.has_gui() or self.sim.has_rtx_sensors()
+        has_gui_attr = getattr(self.sim, "has_gui", False)
+        has_gui = has_gui_attr() if callable(has_gui_attr) else has_gui_attr
+        has_rtx_attr = getattr(self.sim, "has_rtx_sensors", self.rgbd_camera is not None)
+        has_rtx_sensors = has_rtx_attr() if callable(has_rtx_attr) else has_rtx_attr
+        is_rendering = has_gui or has_rtx_sensors
         for substep in range(self.cfg.sim.decimation):
             self.sim_step_counter += 1
             action_target = self.last_processed_actions if substep < latency_steps else processed_actions
@@ -628,8 +633,6 @@ class BaseEnv(VecEnv):
             ],
             dim=-1,
         )
-        if prop.shape[-1] != 33:
-            raise RuntimeError(f"WMP proprioception must be 33 dim for quadrupeds, got {prop.shape[-1]}.")
         return prop
 
     def get_wmp_forward_height_map(self):
@@ -1078,4 +1081,4 @@ class BaseEnv(VecEnv):
             rep.set_global_seed(seed)
         except ModuleNotFoundError:
             pass
-        return torch_utils.set_seed(seed)
+        return configure_seed(seed)

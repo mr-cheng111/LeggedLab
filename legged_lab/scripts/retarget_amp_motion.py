@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Retarget WMP AMP motions from A1 XML to B2 XML with mink."""
+"""Retarget WMP AMP motions from A1 to another quadruped with mink."""
 
 from __future__ import annotations
 
@@ -17,12 +17,22 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from legged_lab.amp.mink_retarget import load_mapping, load_wmp_motion, retarget_motion, save_wmp_motion
-from legged_lab.tools.gmr_motion import GMRMotionConfig, GMRMotionPlugin
+from legged_lab.amp.mink_retarget.io import JOINT_POS, JOINT_VEL
 
 
 DEFAULT_SOURCE_XML = "legged_lab/assets/unitree/a1/mjcf/a1_retarget.xml"
-DEFAULT_TARGET_XML = "legged_lab/assets/unitree/b2/mjcf/b2_retarget.xml"
-DEFAULT_MAPPING = "legged_lab/assets/unitree/b2/mjcf/a1_to_b2_retarget.yaml"
+TARGET_PRESETS = {
+    "b2": {
+        "target_xml": "legged_lab/assets/unitree/b2/mjcf/b2_retarget.xml",
+        "mapping": "legged_lab/assets/unitree/b2/mjcf/a1_to_b2_retarget.yaml",
+        "output_dir": "datasets/retargeted/b2",
+    },
+    "m20": {
+        "target_xml": "legged_lab/assets/deeprobotics/m20/mjcf/m20_retarget.xml",
+        "mapping": "legged_lab/assets/deeprobotics/m20/mjcf/a1_to_m20_retarget.yaml",
+        "output_dir": "datasets/retargeted/m20",
+    },
+}
 
 
 def _expand_inputs(patterns: list[str]) -> list[Path]:
@@ -74,14 +84,42 @@ def _debug_path_for(output_path: Path, args: argparse.Namespace) -> Path | None:
     return path / output_path.with_suffix(".debug.npz").name
 
 
+def _validate_result(result, mapping, output_path: Path) -> tuple[float, float, float]:
+    frames = result.motion.frames
+    if not np.isfinite(frames).all():
+        raise ValueError(f"{output_path} contains NaN or Inf values.")
+    if not np.isfinite(result.foot_error).all():
+        raise ValueError(f"{output_path} contains non-finite foot tracking errors.")
+
+    joint_pos = frames[:, JOINT_POS]
+    limits = mapping.options.joint_project_limits or {}
+    violations = []
+    for joint_idx, joint_name in enumerate(mapping.target.joints):
+        if joint_name not in limits:
+            continue
+        lower, upper = (float(value) for value in limits[joint_name])
+        value_min = float(joint_pos[:, joint_idx].min())
+        value_max = float(joint_pos[:, joint_idx].max())
+        if value_min < lower - 1.0e-6 or value_max > upper + 1.0e-6:
+            violations.append(f"{joint_name}=[{value_min:.4f},{value_max:.4f}] outside [{lower:.4f},{upper:.4f}]")
+    if violations:
+        raise ValueError(f"{output_path} violates target joint limits: {'; '.join(violations)}")
+
+    mean_foot_error = float(np.mean(result.foot_error))
+    max_foot_error = float(np.max(result.foot_error))
+    max_joint_velocity = float(np.max(np.abs(frames[:, JOINT_VEL])))
+    return mean_foot_error, max_foot_error, max_joint_velocity
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input_motion", nargs="+", default=["datasets/wmp_mocap_motions/*.txt"])
+    parser.add_argument("--target_robot", choices=sorted(TARGET_PRESETS), default="b2")
     parser.add_argument("--source_xml", default=DEFAULT_SOURCE_XML)
-    parser.add_argument("--target_xml", default=DEFAULT_TARGET_XML)
-    parser.add_argument("--mapping", default=DEFAULT_MAPPING)
+    parser.add_argument("--target_xml")
+    parser.add_argument("--mapping")
     parser.add_argument("--output_motion")
-    parser.add_argument("--output_dir", default="datasets/retargeted/b2")
+    parser.add_argument("--output_dir")
     parser.add_argument("--debug_npz", nargs="?", const="auto")
     parser.add_argument("--max_frames", type=int)
     parser.add_argument("--validate_only", action="store_true")
@@ -91,7 +129,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gmr_components", type=int, default=8)
     parser.add_argument("--gmr_n_iter", type=int, default=100)
     parser.add_argument("--gmr_covariance_regularization", type=float, default=1.0e-4)
-    return parser.parse_args()
+    args = parser.parse_args()
+    preset = TARGET_PRESETS[args.target_robot]
+    args.target_xml = args.target_xml or preset["target_xml"]
+    args.mapping = args.mapping or preset["mapping"]
+    args.output_dir = args.output_dir or preset["output_dir"]
+    return args
 
 
 def main() -> None:
@@ -106,19 +149,24 @@ def main() -> None:
     multiple = len(input_paths) > 1
     if multiple and args.output_motion:
         raise ValueError("--output_motion can only be used with a single input file.")
-    gmr_plugin = GMRMotionPlugin(
-        GMRMotionConfig(
-            n_components=args.gmr_components,
-            features=tuple(x.strip() for x in args.gmr_features.split(",") if x.strip()),
-            n_iter=args.gmr_n_iter,
-            covariance_regularization=args.gmr_covariance_regularization,
+    gmr_plugin = None
+    if args.gmr_pre or args.gmr_post:
+        from legged_lab.tools.gmr_motion import GMRMotionConfig, GMRMotionPlugin
+
+        gmr_plugin = GMRMotionPlugin(
+            GMRMotionConfig(
+                n_components=args.gmr_components,
+                features=tuple(x.strip() for x in args.gmr_features.split(",") if x.strip()),
+                n_iter=args.gmr_n_iter,
+                covariance_regularization=args.gmr_covariance_regularization,
+            )
         )
-    )
 
     for input_path in input_paths:
         output_path = _output_path_for(input_path, args, multiple)
         motion = load_wmp_motion(input_path)
         if args.gmr_pre:
+            assert gmr_plugin is not None
             motion = gmr_plugin.preprocess(motion)
         result = retarget_motion(
             motion,
@@ -128,12 +176,15 @@ def main() -> None:
             max_frames=args.max_frames,
         )
         if args.gmr_post:
+            assert gmr_plugin is not None
             result.motion = gmr_plugin.postprocess(result.motion)
+        mean_foot_error, max_foot_error, max_joint_velocity = _validate_result(result, mapping, output_path)
         save_wmp_motion(output_path, result.motion)
         print(
             "[OK] wrote "
             f"{output_path} frames={result.motion.frames.shape[0]} "
-            f"mean_foot_error={float(np.mean(result.foot_error)):.5f}"
+            f"foot_error_mean/max={mean_foot_error:.5f}/{max_foot_error:.5f} "
+            f"max_joint_velocity={max_joint_velocity:.3f}"
         )
 
         debug_path = _debug_path_for(output_path, args)

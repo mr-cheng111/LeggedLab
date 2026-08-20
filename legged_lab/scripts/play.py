@@ -11,6 +11,9 @@
 
 import argparse
 import os
+import subprocess
+import sys
+import tempfile
 
 import torch
 from isaaclab.app import AppLauncher
@@ -26,7 +29,14 @@ parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
-parser.add_argument("--runner", type=str, default="default", choices=["default", "wmp_amp"], help="Runner/checkpoint type.")
+parser.add_argument("--max_steps", type=int, default=0, help="Stop after N play steps; 0 runs until the app closes.")
+parser.add_argument(
+    "--runner",
+    type=str,
+    default="default",
+    choices=["default", "wmp", "wmp_amp"],
+    help="Runner/checkpoint type.",
+)
 parser.add_argument("--play_flat", action="store_true", help="Play on a flat plane while keeping WMP sensor obs shapes.")
 parser.add_argument(
     "--play_render_interval",
@@ -40,7 +50,7 @@ parser.add_argument(
     type=str,
     default="auto",
     choices=["auto", "window", "save"],
-    help="How to show WMP depth images. auto falls back to saving PNGs if OpenCV window is unavailable.",
+    help="How to show WMP depth images. window uses an isolated OpenCV process; auto falls back to PNG saving.",
 )
 parser.add_argument("--depth_image_dir", type=str, default=None, help="Directory for saved WMP depth image PNGs.")
 parser.add_argument("--depth_image_save_interval", type=int, default=10, help="Save one depth image every N play steps.")
@@ -78,7 +88,7 @@ parser.add_argument(
     type=float,
     nargs=4,
     default=None,
-    help="Override spawned WMP camera wxyz offset during play.",
+    help="Override spawned WMP camera xyzw offset during play.",
 )
 parser.add_argument(
     "--camera_random_pitch_deg",
@@ -100,7 +110,17 @@ cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
-if args_cli.show_depth_points or args_cli.show_depth_image:
+depth_viewer_process = None
+if args_cli.show_depth_image and args_cli.depth_image_mode == "window":
+    if args_cli.depth_image_dir is None:
+        args_cli.depth_image_dir = tempfile.mkdtemp(prefix="leggedlab_depth_preview_")
+    viewer_script = os.path.join(os.path.dirname(__file__), "depth_image_viewer.py")
+    depth_viewer_process = subprocess.Popen(
+        [sys.executable, viewer_script, args_cli.depth_image_dir, "--parent-pid", str(os.getpid())]
+    )
+    print(f"[INFO] External depth viewer started: {args_cli.depth_image_dir}", flush=True)
+
+if args_cli.runner in ("wmp", "wmp_amp") or args_cli.show_depth_points or args_cli.show_depth_image:
     args_cli.enable_cameras = True
     if args_cli.show_depth_points:
         debug_draw_enable_arg = "--enable isaacsim.util.debug_draw"
@@ -317,13 +337,18 @@ def _show_wmp_depth_image_window(image) -> bool:
         return False
 
 
-def _save_wmp_depth_image(image, output_dir: str, step: int) -> str:
+def _save_wmp_depth_image(image, output_dir: str, step: int, latest_only: bool = False) -> str:
     import cv2
 
     os.makedirs(output_dir, exist_ok=True)
-    path = os.path.join(output_dir, f"depth_{step:06d}.png")
+    path = os.path.join(output_dir, "depth_latest.png" if latest_only else f"depth_{step:06d}.png")
     image_u8 = (image * 255.0).clip(0, 255).astype("uint8")
-    cv2.imwrite(path, image_u8)
+    if latest_only:
+        temporary_path = os.path.join(output_dir, ".depth_latest.tmp.png")
+        cv2.imwrite(temporary_path, image_u8)
+        os.replace(temporary_path, path)
+    else:
+        cv2.imwrite(path, image_u8)
     return path
 
 
@@ -346,7 +371,7 @@ def _handle_wmp_depth_image(
             return shown
     save_interval = max(1, int(save_interval))
     if step % save_interval == 0:
-        path = _save_wmp_depth_image(image, output_dir, step)
+        path = _save_wmp_depth_image(image, output_dir, step, latest_only=mode == "window")
         if step == 0 or step % (save_interval * 20) == 0:
             stats = _wmp_depth_raw_stats(depth_camera, near=near, far=far)
             print(f"[INFO] Saved WMP depth image: {path} | {stats}", flush=True)
@@ -425,6 +450,14 @@ def play():
 
     env_class = task_registry.get_task_class(env_class_name)
     env = env_class(env_cfg, args_cli.headless)
+    if not args_cli.headless:
+        # A depth-only Isaac RTX camera may globally disable color rendering when the Kit visualizer
+        # is not recognized by its legacy has_gui check, leaving the interactive viewport black.
+        env.sim.set_setting("/rtx/sdg/force/disableColorRender", False)
+        robot_pos = env.robot.data.root_pos_w[0].detach().cpu()
+        target = [float(robot_pos[0]), float(robot_pos[1]), float(robot_pos[2])]
+        eye = [target[0] + 2.8, target[1] - 2.8, target[2] + 1.4]
+        env.sim.set_camera_view(eye=eye, target=target)
 
     log_root_path = os.path.join("logs", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)
@@ -443,10 +476,11 @@ def play():
         print("[INFO] Detected rsl_rl v5+, applying legacy cfg compatibility mapping.")
         cfg_dict = adapt_legacy_cfg_for_rsl_rl_v5(cfg_dict)
 
-    if args_cli.runner == "wmp_amp":
-        from legged_lab.runners import WMPAMPRunner
+    if args_cli.runner in ("wmp", "wmp_amp"):
+        from legged_lab.runners import WMPAMPRunner, WMPRunner
 
-        runner = WMPAMPRunner(env, cfg_dict, log_dir=log_dir, device=agent_cfg.device)
+        runner_cls = WMPRunner if args_cli.runner == "wmp" else WMPAMPRunner
+        runner = runner_cls(env, cfg_dict, log_dir=log_dir, device=agent_cfg.device)
     else:
         runner = OnPolicyRunner(env, cfg_dict, log_dir=log_dir, device=agent_cfg.device)
     if is_rsl_rl_v5_plus():
@@ -512,18 +546,20 @@ def play():
 
     depth_debug_counter = 0
     depth_image_step = 0
-    depth_window_available = args_cli.depth_image_mode != "save"
+    # The explicit window mode is displayed by a separate process so Kit and OpenCV do not load Qt in one process.
+    depth_window_available = args_cli.depth_image_mode == "auto"
+    play_step = 0
 
-    while simulation_app.is_running():
+    while simulation_app.is_running() and (args_cli.max_steps <= 0 or play_step < args_cli.max_steps):
 
         with torch.inference_mode():
-            if args_cli.runner == "wmp_amp":
+            if args_cli.runner in ("wmp", "wmp_amp"):
                 wm_obs, wm_feature = runner.wmp_controller.observe_before_policy()
                 wm_feature = wm_feature.to(env.device)
                 obs["wmp"] = wm_feature
             actions = policy(obs)
             obs, rewards, dones, _ = env.step(actions)
-            if args_cli.runner == "wmp_amp":
+            if args_cli.runner in ("wmp", "wmp_amp"):
                 runner.wmp_controller.after_env_step(actions, rewards, dones, wm_obs)
             if depth_camera is not None and args_cli.show_depth_image:
                 depth_window_available = _handle_wmp_depth_image(
@@ -563,6 +599,9 @@ def play():
                 if not args_cli.headless:
                     env.sim.render()
                 depth_debug_counter += 1
+            play_step += 1
+
+    env.close()
 
 
 if __name__ == "__main__":

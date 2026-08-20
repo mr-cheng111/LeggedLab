@@ -17,6 +17,7 @@
 - 增加 A1 WMP-AMP 训练链路、原版 WMP 对齐检查与辅助脚本
 - 保留 B2 RGBD / WMP world model 前向检查脚本
 - 增加 RB160W 轮腿机器人任务、混合腿位置/轮速度控制与模型验证脚本
+- 增加 DEEP Robotics M20 官方 USD、平地/粗糙地形任务和轮足混合控制
 
 ## Fork Statement
 
@@ -102,6 +103,7 @@ python legged_lab/scripts/launcher_gui.py
 - `b2_rgbd_flat`, `b2_rgbd_stand`, `b2_rgbd_slow_walk`, `b2_rgbd_rough`
 - `b2_rgbd_wmp_amp_flat`, `b2_rgbd_wmp_amp_terrain`
 - `rb160w_flat`
+- `m20_flat`, `m20_rough`, `m20_depth_rough`, `m20_depth_rough_amp`
 
 注册位置：`legged_lab/envs/__init__.py`
 
@@ -144,6 +146,124 @@ python legged_lab/scripts/inspect_rb160w_model.py --task=rb160w_flat --mode=swee
 - `inspect_rb160w_model.py` 默认会固定 root，防止验证时机器人自由下落；如需放开 root，可加 `--free_root`。
 - 实际仿真加载的是 `legged_lab/assets/xuanji/rb160w/usd/rb160w.usd`。修改 URDF 只会影响源文件记录，除非重新导出 USD。
 - `rb160w.usd` 当前接近 GitHub 单文件建议上限。若需要长期瘦身，推荐生成新的轻量版 USD 或使用 Git LFS，不建议直接在原 USD 上反复手工改。
+
+## DEEP Robotics M20
+
+文档中的机器人是云深处山猫 M20（Lynx M20），每条腿包含 `hipx`, `hipy`, `knee`, `wheel`
+四个关节，共 16 个自由度。本仓库直接使用厂商
+[`deep_robotics_model`](https://github.com/DeepRoboticsLab/deep_robotics_model) 中的官方 USD，
+资产提交和许可证记录在 `legged_lab/assets/deeprobotics/SOURCE.md`。
+
+动作空间对齐厂商训练和 ONNX 部署顺序（12 个腿关节在前，4 个轮关节在后）：
+
+- 12 个腿关节使用位置目标；`hipx` 动作缩放为 `0.125 rad`，`hipy/knee` 为 `0.25 rad`
+- 4 个轮关节使用速度目标，动作缩放为 `5.0 rad/s`
+
+先用平地任务做资产和控制验证：
+
+```bash
+python legged_lab/scripts/train.py --task=m20_flat --headless --num_envs=64 --logger=tensorboard
+```
+
+平地策略稳定后，可启动本仓库通用粗糙地形基线：
+
+```bash
+python legged_lab/scripts/train.py --task=m20_rough --headless --num_envs=4096 --logger=tensorboard
+```
+
+`m20_rough` 复用本仓库的地形生成器和基础轮足奖励，并非厂商 `rl_training` 中全部 M20
+专用转向步态奖励的逐项移植。需要直接复现厂商任务时，可使用官方
+[`rl_training`](https://github.com/DeepRoboticsLab/rl_training) 的
+`Rough-Deeprobotics-M20-v0`。
+
+`m20_flat` 和 `m20_rough` 面向无视觉本体运动训练。`m20_depth_rough` 在 `base_link` 下挂载
+64x64 前向深度相机，并使用不依赖 AMP 专家动作的 WMP-PPO：部分环境的真实深度监督
+DepthPredictor，RSSM depth feature 进入 actor；理想高度扫描只用于深度预测监督和 critic。
+
+深度任务训练示例：
+
+```bash
+python legged_lab/scripts/train.py \
+  --task=m20_depth_rough \
+  --num_envs=64 \
+  --enable_cameras \
+  --wmp_camera_num_envs=8 \
+  --logger=tensorboard
+```
+
+使用 WMP checkpoint 回放时必须选择 `--runner=wmp`。例如回放仓库当前阶段验证模型：
+
+```bash
+python legged_lab/scripts/play.py \
+  --task=m20_depth_rough \
+  --runner=wmp \
+  --num_envs=1 \
+  --viz=kit \
+  --load_run=2026-08-19_17-39-49_depth64_corrected \
+  --checkpoint=model_19.pt
+```
+
+`model_19.pt` 只训练了 20 轮，用于验证 RTX depth -> DepthPredictor/RSSM -> PPO 的完整链路，
+不是收敛或可部署模型。
+
+### M20 AMP motion retarget
+
+`m20_depth_rough_amp` 在深度 WMP 任务上增加 AMP。专家状态保持原版 30 维契约：
+`joint_pos(12) + base_lin_vel_b(3) + base_ang_vel_b(3) + joint_vel(12)`。12 个关节严格按
+`M20_LEG_JOINT_NAMES` 排列，4 个连续转动轮关节不进入 AMP 判别器。
+
+使用已安装好 MuJoCo 和 Mink 的 `mujoco` 环境批量重定向原始 A1 motion：
+
+```bash
+conda run --no-capture-output -n mujoco \
+  python legged_lab/scripts/retarget_amp_motion.py \
+  --target_robot=m20 \
+  --input_motion 'datasets/wmp_mocap_motions/*.txt' \
+  --debug_npz
+```
+
+输出位于 `datasets/retargeted/m20/`。M20 前腿和 A1 的屈曲方向相反，映射会镜像前腿
+局部 sagittal x 轨迹后再做 Mink IK；不要用逐关节复制替代该步骤。
+
+小规模真相机训练 smoke：
+
+```bash
+conda run --no-capture-output -n isaaclab3 \
+  python legged_lab/scripts/train.py \
+  --task=m20_depth_rough_amp \
+  --runner=wmp_amp \
+  --num_envs=2 \
+  --enable_cameras \
+  --wmp_camera_num_envs=2 \
+  --max_iterations=1 \
+  --num_steps_per_env=2 \
+  --num_mini_batches=1 \
+  --amp_num_preload_transitions=256 \
+  --viz=none \
+  --logger=tensorboard
+```
+
+正式训练：
+
+```bash
+conda run --no-capture-output -n isaaclab3 \
+  python legged_lab/scripts/train.py \
+  --task=m20_depth_rough_amp \
+  --runner=wmp_amp \
+  --num_envs=4096 \
+  --enable_cameras \
+  --wmp_camera_num_envs=256 \
+  --viz=none \
+  --logger=tensorboard
+```
+
+播放和模型检查：
+
+```bash
+python legged_lab/scripts/play.py --task=m20_flat --num_envs=1 --hide_command
+python legged_lab/scripts/inspect_rb160w_model.py --task=m20_flat --mode=print --headless
+python legged_lab/scripts/inspect_rb160w_model.py --task=m20_flat --mode=sweep --joint=".*_hipx_joint"
+```
 
 ## Use Your Own Robot
 

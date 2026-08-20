@@ -51,6 +51,17 @@ from legged_lab.envs.b2.b2_config import (
 )
 from legged_lab.envs.rb160w.rb160w_config import RB160WFlatAgentCfg, RB160WFlatEnvCfg
 from legged_lab.envs.rb160w.rb160w_env import RB160WEnv
+from legged_lab.envs.base.wheeled_env import WheeledEnv
+from legged_lab.envs.m20.m20_config import (
+    M20DepthRoughAMPAgentCfg,
+    M20DepthRoughAMPEnvCfg,
+    M20DepthRoughAgentCfg,
+    M20DepthRoughEnvCfg,
+    M20FlatAgentCfg,
+    M20FlatEnvCfg,
+    M20RoughAgentCfg,
+    M20RoughEnvCfg,
+)
 from legged_lab.utils.task_registry import task_registry
 
 task_registry.register("a1_amp_flat", BaseEnv, A1AMPFlatEnvCfg(), A1AMPFlatAgentCfg())
@@ -76,3 +87,12 @@ task_registry.register(
     B2RGBDWMPAMPTerrainAgentCfg(),
 )
 task_registry.register("rb160w_flat", RB160WEnv, RB160WFlatEnvCfg(), RB160WFlatAgentCfg())
+task_registry.register("m20_flat", WheeledEnv, M20FlatEnvCfg(), M20FlatAgentCfg())
+task_registry.register("m20_rough", WheeledEnv, M20RoughEnvCfg(), M20RoughAgentCfg())
+task_registry.register("m20_depth_rough", WheeledEnv, M20DepthRoughEnvCfg(), M20DepthRoughAgentCfg())
+task_registry.register(
+    "m20_depth_rough_amp",
+    WheeledEnv,
+    M20DepthRoughAMPEnvCfg(),
+    M20DepthRoughAMPAgentCfg(),
+)

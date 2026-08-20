@@ -35,6 +35,7 @@ class RetargetOptions:
     root_cost: float = 2.0
     neutral_joint_pos: dict[str, float] | None = None
     joint_project_limits: dict[str, tuple[float, float] | list[float]] | None = None
+    leg_axis_scale: dict[str, tuple[float, float, float] | list[float]] | None = None
 
 
 @dataclass(frozen=True)

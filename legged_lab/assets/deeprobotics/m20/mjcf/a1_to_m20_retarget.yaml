@@ -1,0 +1,118 @@
+source:
+  xml: legged_lab/assets/unitree/a1/mjcf/a1_retarget.xml
+  root_freejoint: root
+  base_site: base_site
+  joints:
+    - FR_hip_joint
+    - FR_thigh_joint
+    - FR_calf_joint
+    - FL_hip_joint
+    - FL_thigh_joint
+    - FL_calf_joint
+    - RR_hip_joint
+    - RR_thigh_joint
+    - RR_calf_joint
+    - RL_hip_joint
+    - RL_thigh_joint
+    - RL_calf_joint
+  frames:
+    base: base_site
+    FR_hip: FR_hip_site
+    FR_thigh: FR_thigh_site
+    FR_calf: FR_calf_site
+    FR_foot: FR_foot_site
+    FL_hip: FL_hip_site
+    FL_thigh: FL_thigh_site
+    FL_calf: FL_calf_site
+    FL_foot: FL_foot_site
+    RR_hip: RR_hip_site
+    RR_thigh: RR_thigh_site
+    RR_calf: RR_calf_site
+    RR_foot: RR_foot_site
+    RL_hip: RL_hip_site
+    RL_thigh: RL_thigh_site
+    RL_calf: RL_calf_site
+    RL_foot: RL_foot_site
+
+target:
+  xml: legged_lab/assets/deeprobotics/m20/mjcf/m20_retarget.xml
+  root_freejoint: root
+  base_site: base_site
+  # This order matches M20_LEG_JOINT_NAMES and WheeledEnv AMP observations.
+  joints:
+    - fl_hipx_joint
+    - fl_hipy_joint
+    - fl_knee_joint
+    - fr_hipx_joint
+    - fr_hipy_joint
+    - fr_knee_joint
+    - hl_hipx_joint
+    - hl_hipy_joint
+    - hl_knee_joint
+    - hr_hipx_joint
+    - hr_hipy_joint
+    - hr_knee_joint
+  frames:
+    base: base_site
+    FR_hip: fr_hipx_site
+    FR_thigh: fr_hipy_site
+    FR_calf: fr_knee_site
+    FR_foot: fr_wheel_site
+    FL_hip: fl_hipx_site
+    FL_thigh: fl_hipy_site
+    FL_calf: fl_knee_site
+    FL_foot: fl_wheel_site
+    RR_hip: hr_hipx_site
+    RR_thigh: hr_hipy_site
+    RR_calf: hr_knee_site
+    RR_foot: hr_wheel_site
+    RL_hip: hl_hipx_site
+    RL_thigh: hl_hipy_site
+    RL_calf: hl_knee_site
+    RL_foot: hl_wheel_site
+
+retarget:
+  root_height_offset: 0.29
+  root_xy_scale: 1.0
+  frame_position_scale: 1.0
+  frame_target_mode: morphology_scaled
+  posture_mode: neutral
+  max_ik_iters: 40
+  solver: mink
+  qp_solver: daqp
+  damping: 1.0e-5
+  posture_cost: 0.005
+  frame_pos_cost: 1.0
+  foot_pos_cost: 4.0
+  root_cost: 2.0
+  # M20 front legs fold forward, while A1 front legs use the same sagittal
+  # branch as its rear legs. Mirror source x only for the two front legs.
+  leg_axis_scale:
+    FR: [-1.0, 1.0, 1.0]
+    FL: [-1.0, 1.0, 1.0]
+  neutral_joint_pos:
+    fl_hipx_joint: 0.0
+    fl_hipy_joint: -0.3
+    fl_knee_joint: 0.6
+    fr_hipx_joint: 0.0
+    fr_hipy_joint: -0.3
+    fr_knee_joint: 0.6
+    hl_hipx_joint: 0.0
+    hl_hipy_joint: 0.3
+    hl_knee_joint: -0.6
+    hr_hipx_joint: 0.0
+    hr_hipy_joint: 0.3
+    hr_knee_joint: -0.6
+  joint_project_limits:
+    fl_hipx_joint: [-0.436, 0.611]
+    fl_hipy_joint: [-2.583, 2.286]
+    fl_knee_joint: [-2.792, 2.809]
+    fr_hipx_joint: [-0.611, 0.436]
+    fr_hipy_joint: [-2.583, 2.286]
+    fr_knee_joint: [-2.792, 2.809]
+    hl_hipx_joint: [-0.436, 0.611]
+    hl_hipy_joint: [-2.286, 2.583]
+    hl_knee_joint: [-2.809, 2.792]
+    hr_hipx_joint: [-0.611, 0.436]
+    hr_hipy_joint: [-2.286, 2.583]
+    hr_knee_joint: [-2.809, 2.792]

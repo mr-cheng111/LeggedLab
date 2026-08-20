@@ -89,7 +89,7 @@ class RGBDCameraCfg:
     partial_camera_force_tilt_crawl: bool = True
     spawn_prim_path: str = "base/rgbd_camera"
     spawn_offset_pos: tuple[float, float, float] = (0.27, 0.0, 0.03)
-    spawn_offset_rot: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
+    spawn_offset_rot: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
     spawn_offset_convention: str = "world"
     horizontal_aperture: float = 20.955
     vertical_aperture: float | None = None
@@ -124,7 +124,10 @@ class RobotCfg:
     actor_obs_history_length: int = 10
     critic_obs_history_length: int = 10
     action_scale: float = 0.25
+    leg_position_scale: dict[str, float] = {}
     wheel_velocity_scale: float = 8.0
+    wheel_joint_names_expr: str = ".*_WHEEL_joint"
+    policy_joint_names: list[str] = []
     terminate_contacts_body_names: list = []
     feet_body_names: list = []
     wmp_privileged_contact_body_names: list = []

@@ -159,9 +159,13 @@ def _build_frame_goals(
         source_hip = source_sites[f"{leg}_hip"]
         target_hip = target_root + target_neutral_sites[f"{leg}_hip"]
         goals[f"{leg}_hip"] = target_hip
+        leg_axis_scale = (mapping.options.leg_axis_scale or {}).get(leg, (1.0, 1.0, 1.0))
+        leg_axis_scale = np.asarray(leg_axis_scale, dtype=np.float64)
+        if leg_axis_scale.shape != (3,):
+            raise ValueError(f"retarget.leg_axis_scale[{leg!r}] must contain exactly three values.")
         for suffix in ("thigh", "calf", "foot"):
             key = f"{leg}_{suffix}"
-            rel = source_sites[key] - source_hip
+            rel = (source_sites[key] - source_hip) * leg_axis_scale
             goals[key] = target_hip + rel * ratios.get(key, 1.0) * mapping.options.frame_position_scale
     return goals
 

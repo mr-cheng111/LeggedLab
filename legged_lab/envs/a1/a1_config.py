@@ -216,7 +216,7 @@ class A1WMPAMPTerrainEnvCfg(A1AMPFlatEnvCfg):
         self.scene.rgbd_camera.camera_model = "pinhole"
         self.scene.rgbd_camera.spawn_prim_path = "trunk/rgbd_camera"
         self.scene.rgbd_camera.spawn_offset_pos = (0.3, 0.0, 0.03)
-        self.scene.rgbd_camera.spawn_offset_rot = (1.0, 0.0, 0.0, 0.0)
+        self.scene.rgbd_camera.spawn_offset_rot = (0.0, 0.0, 0.0, 1.0)
         self.scene.rgbd_camera.width = 64
         self.scene.rgbd_camera.height = 64
         self.scene.rgbd_camera.depth_near = 0.0

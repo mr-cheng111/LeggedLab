@@ -145,33 +145,30 @@ class WMPTrainingController:
         self.action_history = torch.cat((self.action_history[:, 1:], actions.unsqueeze(1)), dim=1)
         self.reward_accumulator += rewards
 
-        if torch.any(dones):
-            reset_ids = dones.nonzero(as_tuple=False).flatten()
-            for env_id in reset_ids.tolist():
-                self.replay.finish_episode(env_id)
-            self.action_history[reset_ids] = 0.0
-            self.reward_accumulator[reset_ids] = 0.0
-            self.is_first[reset_ids] = 1.0
+        reset_ids = dones.nonzero(as_tuple=False).flatten()
+        self.replay.finish_episodes(reset_ids)
+        self.action_history[reset_ids] = 0.0
+        self.reward_accumulator[reset_ids] = 0.0
+        self.is_first[reset_ids] = 1.0
 
         next_step_counter = self.step_counter + 1
         if next_step_counter % self.update_interval == 0:
             next_wm_obs = self._read_wm_obs()
             wm_action = self.action_history.reshape(self.env.num_envs, -1)
             store_ids = (1.0 - self.is_first).nonzero(as_tuple=False).flatten()
-            for env_id in store_ids.tolist():
-                self.replay.add_step(
-                    env_id,
-                    {
-                        "prop": next_wm_obs["prop"][env_id],
-                        "image": next_wm_obs["image"][env_id],
-                        "forward_height_map": next_wm_obs["forward_height_map"][env_id],
-                        "action": wm_action[env_id],
-                        "reward": self.reward_accumulator[env_id].view(1),
-                        "is_first": next_wm_obs["is_first"][env_id].view(1),
-                        "is_terminal": dones[env_id].float().view(1),
-                        "has_real_depth": next_wm_obs["has_real_depth"][env_id].view(1),
-                    },
-                )
+            self.replay.add_steps(
+                store_ids,
+                {
+                    "prop": next_wm_obs["prop"],
+                    "image": next_wm_obs["image"],
+                    "forward_height_map": next_wm_obs["forward_height_map"],
+                    "action": wm_action,
+                    "reward": self.reward_accumulator.unsqueeze(-1),
+                    "is_first": next_wm_obs["is_first"].unsqueeze(-1),
+                    "is_terminal": dones.float().unsqueeze(-1),
+                    "has_real_depth": next_wm_obs["has_real_depth"].unsqueeze(-1),
+                },
+            )
             self.reward_accumulator.zero_()
             self.pending_obs = next_wm_obs
 
@@ -210,6 +207,17 @@ class WMPTrainingController:
         }
         if hasattr(self.replay, "max_episode_steps"):
             stats["wm_replay_max_episode_steps"] = float(self.replay.max_episode_steps)
+        depth_buffer = getattr(self.env, "wmp_depth_buffer", None)
+        if depth_buffer is not None and depth_buffer.numel() > 0:
+            depth = depth_buffer[:, 0].detach().float()
+            stats.update(
+                {
+                    "wm_real_depth_mean": float(depth.mean().cpu()),
+                    "wm_real_depth_std": float(depth.std().cpu()),
+                    "wm_real_depth_min": float(depth.amin().cpu()),
+                    "wm_real_depth_max": float(depth.amax().cpu()),
+                }
+            )
         return stats
 
     def state_dict(self) -> dict:

@@ -2,6 +2,6 @@
 """LeggedLab 自定义 runner。"""
 
 from .amp_ppo_runner import AMPPPORunner
-from .wmp_amp_runner import WMPAMPRunner
+from .wmp_amp_runner import WMPAMPRunner, WMPRunner
 
-__all__ = ["AMPPPORunner", "WMPAMPRunner"]
+__all__ = ["AMPPPORunner", "WMPAMPRunner", "WMPRunner"]

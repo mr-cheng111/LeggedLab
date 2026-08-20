@@ -86,6 +86,9 @@ class WMPAMPRunner:
         cfg = self.cfg
         cfg["algorithm"]["class_name"] = "legged_lab.algorithms.wmp_amp_ppo:WMPAMPPPO"
         alg_class: type[WMPAMPPPO] = resolve_callable(cfg["algorithm"].pop("class_name"))
+        # IsaacLab's adapter config includes this construction-only field, but
+        # the locally installed rsl_rl PPO constructor does not accept it.
+        cfg["algorithm"].pop("share_cnn_encoders", None)
         actor_class = resolve_callable(cfg["actor"].pop("class_name"))
         critic_class = resolve_callable(cfg["critic"].pop("class_name"))
         cfg["obs_groups"] = resolve_obs_groups(obs, cfg["obs_groups"], ["actor", "critic"])
@@ -186,7 +189,7 @@ class WMPAMPRunner:
         expert_min = expert_joint_pos.amin(dim=0)
         expert_max = expert_joint_pos.amax(dim=0)
         policy_mean = policy_joint_pos.mean(dim=0)
-        joint_names = list(self.env.robot.joint_names)
+        joint_names = list(getattr(self.env, "amp_joint_names", self.env.robot.joint_names))
         print("[INFO] WMP-AMP joint stats after expert retarget (expert_mean[min,max] vs current_env_mean):")
         for idx, joint_name in enumerate(joint_names[:12]):
             print(
@@ -354,3 +357,83 @@ class WMPAMPRunner:
     def get_inference_policy(self, device: str | None = None):
         self.alg.eval_mode()
         return self.alg.get_policy().to(device)
+
+
+class WMPRunner(WMPAMPRunner):
+    """WMP-PPO runner for robots without compatible AMP motion data."""
+
+    def _build_algorithm(self, obs):
+        cfg = self.cfg
+        cfg["algorithm"]["class_name"] = "rsl_rl.algorithms:PPO"
+        alg_class = resolve_callable(cfg["algorithm"]["class_name"])
+        return alg_class.construct_algorithm(obs, self.env, cfg, self.device)
+
+    def _build_amp(self):
+        print("[INFO] WMP-PPO enabled without AMP expert motions.")
+
+    def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):
+        if init_at_random_ep_len:
+            self.env.episode_length_buf = torch.randint_like(
+                self.env.episode_length_buf, high=int(self.env.max_episode_length)
+            )
+        self.alg.train_mode()
+        self.logger.init_logging_writer()
+        self.total_env_steps = self.current_learning_iteration * self.cfg["num_steps_per_env"] * self.env.num_envs
+        wm_feature = torch.zeros(self.env.num_envs, self.wm_feature_dim, device=self.device)
+        obs = self._augment_obs(self.env.get_observations().to(self.device), wm_feature)
+        start_it = self.current_learning_iteration
+        total_it = start_it + num_learning_iterations
+
+        for it in range(start_it, total_it):
+            curriculum_logs = {}
+            if hasattr(self.env, "update_training_curriculum"):
+                curriculum_logs = self.env.update_training_curriculum(it)
+            elif hasattr(self.env, "update_reward_curriculum"):
+                curriculum_logs = self.env.update_reward_curriculum(it)
+            start = time.time()
+            with torch.inference_mode():
+                for _ in range(self.cfg["num_steps_per_env"]):
+                    wm_obs, wm_feature = self.wmp_controller.observe_before_policy()
+                    obs = self._augment_obs(obs, wm_feature.to(self.device))
+                    actions = self.alg.act(obs)
+                    next_obs, rewards, dones, extras = self.env.step(actions.to(self.env.device))
+                    if self.cfg.get("check_for_nan", True):
+                        check_nan(next_obs, rewards, dones)
+                    self.wmp_controller.after_env_step(actions, rewards, dones, wm_obs)
+                    self.total_env_steps += self.env.num_envs
+                    next_obs = self._augment_obs(next_obs.to(self.device), wm_feature)
+                    rewards = rewards.to(self.device)
+                    dones = dones.to(self.device)
+                    self.alg.process_env_step(next_obs, rewards, dones, extras)
+                    self.logger.process_env_step(rewards, dones, extras)
+                    obs = next_obs
+                collect_time = time.time() - start
+                start = time.time()
+                self.alg.compute_returns(obs)
+
+            update_start = time.time()
+            loss_dict = self.alg.update()
+            loss_dict["time/ppo_update"] = time.time() - update_start
+            loss_dict.update(curriculum_logs)
+            loss_dict.update(self.wmp_controller.train_if_ready(it, self.total_env_steps))
+            loss_dict.update(self.wmp_controller.replay_stats())
+            loss_dict.update(self._resource_stats())
+            learn_time = time.time() - start
+            self.current_learning_iteration = it
+            self.logger.log(
+                it,
+                start_it,
+                total_it,
+                collect_time,
+                learn_time,
+                loss_dict,
+                self.alg.learning_rate,
+                self.alg.get_policy().output_std,
+                None,
+            )
+            self._log_wandb_history(it, collect_time, learn_time, loss_dict)
+            if self.logger.writer is not None and it % self.cfg["save_interval"] == 0:
+                self.save(os.path.join(self.logger.log_dir, f"model_{it}.pt"))
+        if self.logger.writer is not None:
+            self.save(os.path.join(self.logger.log_dir, f"model_{self.current_learning_iteration}.pt"))
+            self.logger.stop_logging_writer()

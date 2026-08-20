@@ -24,6 +24,11 @@ if TYPE_CHECKING:
     from legged_lab.envs.base.base_env import BaseEnv
 
 
+def _as_torch(value):
+    """Return the Torch view exposed by IsaacLab 3 ProxyArray values."""
+    return value.torch if hasattr(value, "torch") else value
+
+
 def push_by_setting_velocity_with_recovery_marker(
     env: BaseEnv,
     env_ids: torch.Tensor,
@@ -60,7 +65,7 @@ def track_lin_vel_xy_yaw_frame_exp(
     """
     asset: Articulation = env.scene[asset_cfg.name]
     vel_yaw = math_utils.quat_apply_inverse(
-        math_utils.yaw_quat(asset.data.root_quat_w), asset.data.root_lin_vel_w[:, :3]
+        math_utils.yaw_quat(_as_torch(asset.data.root_quat_w)), asset.data.root_lin_vel_w[:, :3]
     )
     command = env.command_generator.command[:, :2]
     lin_vel = vel_yaw[:, :2]
@@ -85,7 +90,7 @@ def track_lin_vel_x_yaw_frame_exp(
     """
     asset: Articulation = env.scene[asset_cfg.name]
     vel_yaw = math_utils.quat_apply_inverse(
-        math_utils.yaw_quat(asset.data.root_quat_w), asset.data.root_lin_vel_w[:, :3]
+        math_utils.yaw_quat(_as_torch(asset.data.root_quat_w)), asset.data.root_lin_vel_w[:, :3]
     )
     lin_vel_error = torch.square(env.command_generator.command[:, 0] - vel_yaw[:, 0])
     return torch.exp(-lin_vel_error / std**2)
@@ -172,7 +177,13 @@ def ang_vel_z_l2(env: BaseEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot
 
 def energy(env: BaseEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     asset: Articulation = env.scene[asset_cfg.name]
-    reward = torch.norm(torch.abs(asset.data.applied_torque * asset.data.joint_vel), dim=-1)
+    reward = torch.norm(
+        torch.abs(
+            asset.data.applied_torque[:, asset_cfg.joint_ids]
+            * asset.data.joint_vel[:, asset_cfg.joint_ids]
+        ),
+        dim=-1,
+    )
     return reward
 
 
@@ -196,17 +207,23 @@ def action_rate_l2(env: BaseEnv) -> torch.Tensor:
 
 
 def action_rate_l2_joint(env: BaseEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    action_ids = asset_cfg.joint_ids
+    if hasattr(env, "action_indices_for_joint_ids"):
+        action_ids = env.action_indices_for_joint_ids(asset_cfg.joint_ids)
     return torch.sum(
         torch.square(
-            env.action_buffer._circular_buffer.buffer[:, -1, asset_cfg.joint_ids]
-            - env.action_buffer._circular_buffer.buffer[:, -2, asset_cfg.joint_ids]
+            env.action_buffer._circular_buffer.buffer[:, -1, action_ids]
+            - env.action_buffer._circular_buffer.buffer[:, -2, action_ids]
         ),
         dim=1,
     )
 
 
 def action_l2_joint(env: BaseEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
-    return torch.sum(torch.square(env.action_buffer._circular_buffer.buffer[:, -1, asset_cfg.joint_ids]), dim=1)
+    action_ids = asset_cfg.joint_ids
+    if hasattr(env, "action_indices_for_joint_ids"):
+        action_ids = env.action_indices_for_joint_ids(asset_cfg.joint_ids)
+    return torch.sum(torch.square(env.action_buffer._circular_buffer.buffer[:, -1, action_ids]), dim=1)
 
 
 def stand_still_joint_deviation_l1(
@@ -466,7 +483,7 @@ def dof_error_l2(env: BaseEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot
 
 def cheat_yaw(env: BaseEnv, heading_limit: float = 1.0, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     asset: Articulation = env.scene[asset_cfg.name]
-    forward = math_utils.quat_apply(asset.data.root_quat_w, asset.data.FORWARD_VEC_B)
+    forward = math_utils.quat_apply(_as_torch(asset.data.root_quat_w), asset.data.FORWARD_VEC_B)
     heading = torch.atan2(forward[:, 1], forward[:, 0])
     return (torch.abs(heading) > heading_limit).float()
 

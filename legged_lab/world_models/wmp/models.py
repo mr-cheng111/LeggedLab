@@ -244,15 +244,17 @@ class WMPFixedEpisodeReplayBuffer:
         self.device = torch.device(device)
         # 保留 env.depth_index 的顺序，避免真实 depth 的 camera slot 与 env id 映射错位。
         self.camera_env_ids = self._ordered_unique_valid(camera_env_ids)
-        self.env_to_camera_slot = torch.full((self.num_envs,), -1, dtype=torch.long)
+        self.env_to_camera_slot = torch.full((self.num_envs,), -1, device=self.device, dtype=torch.long)
         if self.camera_env_ids.numel() > 0:
-            self.env_to_camera_slot[self.camera_env_ids] = torch.arange(self.camera_env_ids.numel(), dtype=torch.long)
+            self.env_to_camera_slot[self.camera_env_ids] = torch.arange(
+                self.camera_env_ids.numel(), device=self.device, dtype=torch.long
+            )
         self.depth_index_inverse = self._make_depth_index_inverse(depth_index_inverse)
         if depth_index_without_crawl_tilt is None:
             depth_index_without_crawl_tilt = self.camera_env_ids
         self.depth_index_without_crawl_tilt = self._ordered_unique_valid(depth_index_without_crawl_tilt)
         if depth_predictor_excluded_env_ids is not None:
-            excluded = torch.zeros(self.num_envs, dtype=torch.bool)
+            excluded = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
             excluded[self._ordered_unique_valid(depth_predictor_excluded_env_ids)] = True
             self.depth_index_without_crawl_tilt = self.depth_index_without_crawl_tilt[
                 ~excluded[self.depth_index_without_crawl_tilt]
@@ -261,9 +263,9 @@ class WMPFixedEpisodeReplayBuffer:
             has_camera = self.env_to_camera_slot[self.depth_index_without_crawl_tilt] >= 0
             self.depth_index_without_crawl_tilt = self.depth_index_without_crawl_tilt[has_camera]
 
-        self.current_index = torch.zeros(self.num_envs, dtype=torch.long)
-        self.dataset_size = torch.zeros(self.num_envs, dtype=torch.long)
-        self.has_episode = torch.zeros(self.num_envs, dtype=torch.bool)
+        self.current_index = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
+        self.dataset_size = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
+        self.has_episode = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self._current: dict[str, torch.Tensor] | None = None
         self._dataset: dict[str, torch.Tensor] | None = None
         self._current_image: torch.Tensor | None = None
@@ -278,46 +280,74 @@ class WMPFixedEpisodeReplayBuffer:
         return int(self.dataset_size[self.has_episode].sum().item())
 
     def add_step(self, env_id: int, transition: dict[str, torch.Tensor]):
+        batched = {key: value.unsqueeze(0) for key, value in transition.items()}
+        self.add_steps(torch.tensor([env_id], device=self.device), batched)
+
+    def add_steps(self, env_ids: torch.Tensor, transitions: dict[str, torch.Tensor]):
+        """Append one transition for many environments without Python-side per-env copies."""
+        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long).flatten()
+        if env_ids.numel() == 0:
+            return
         if self._current is None:
-            self._init_storage(transition)
+            self._init_storage(transitions, batched=True)
         assert self._current is not None
         assert self._dataset is not None
 
-        env_id = int(env_id)
-        step_id = int(self.current_index[env_id].item())
-        if step_id >= self.max_episode_steps:
+        input_count = env_ids.numel()
+        step_ids = self.current_index[env_ids]
+        valid = step_ids < self.max_episode_steps
+        env_ids = env_ids[valid]
+        step_ids = step_ids[valid]
+        if env_ids.numel() == 0:
             return
 
-        for key, value in transition.items():
+        for key, value in transitions.items():
             if key == "image":
                 continue
-            self._current[key][env_id, step_id].copy_(value.detach().to(self.device).float())
+            batch_value = self._select_transition_batch(value, env_ids, valid, input_count)
+            self._current[key][env_ids, step_ids] = batch_value
 
-        camera_slot = int(self.env_to_camera_slot[env_id].item())
-        has_real_depth = float(transition.get("has_real_depth", torch.zeros(1)).detach().flatten()[0].item()) > 0.5
-        if camera_slot >= 0 and has_real_depth and self._current_image is not None:
-            self._current_image[camera_slot, step_id].copy_(transition["image"].detach().to(self.device).float())
-        self.current_index[env_id] += 1
+        camera_slots = self.env_to_camera_slot[env_ids]
+        has_real_depth = self._select_transition_batch(
+            transitions["has_real_depth"], env_ids, valid, input_count
+        ).reshape(env_ids.numel(), -1)[:, 0] > 0.5
+        store_image = (camera_slots >= 0) & has_real_depth
+        if self._current_image is not None:
+            images = self._select_transition_subset(
+                transitions["image"], env_ids, valid, store_image, input_count
+            )
+            self._current_image[camera_slots[store_image], step_ids[store_image]] = images
+        self.current_index[env_ids] = step_ids + 1
 
     def finish_episode(self, env_id: int):
+        self.finish_episodes(torch.tensor([env_id], device=self.device))
+
+    def finish_episodes(self, env_ids: torch.Tensor):
+        """Commit completed episodes in one device-side indexed copy."""
         if self._current is None:
             return
         assert self._dataset is not None
 
-        env_id = int(env_id)
-        length = int(self.current_index[env_id].item())
-        self.current_index[env_id] = 0
-        if length < 2:
+        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long).flatten()
+        if env_ids.numel() == 0:
             return
-
+        lengths = self.current_index[env_ids].clone()
+        self.current_index[env_ids] = 0
+        valid = lengths >= 2
+        env_ids = env_ids[valid]
+        lengths = lengths[valid]
+        if env_ids.numel() == 0:
+            return
         for key, current_value in self._current.items():
-            self._dataset[key][env_id, :length].copy_(current_value[env_id, :length])
-        camera_slot = int(self.env_to_camera_slot[env_id].item())
-        if camera_slot >= 0 and self._current_image is not None and self._dataset_image is not None:
-            self._dataset_image[camera_slot, :length].copy_(self._current_image[camera_slot, :length])
+            self._dataset[key][env_ids] = current_value[env_ids]
+        camera_slots = self.env_to_camera_slot[env_ids]
+        has_camera = camera_slots >= 0
+        if self._current_image is not None and self._dataset_image is not None:
+            slots = camera_slots[has_camera]
+            self._dataset_image[slots] = self._current_image[slots]
 
-        self.dataset_size[env_id] = length
-        self.has_episode[env_id] = True
+        self.dataset_size[env_ids] = lengths
+        self.has_episode[env_ids] = True
 
     def can_sample(self, batch_size: int, batch_length: int) -> bool:
         del batch_length
@@ -347,17 +377,22 @@ class WMPFixedEpisodeReplayBuffer:
         if batch_length <= 1:
             raise RuntimeError("WMP fixed replay sampled sequence length must be greater than 1.")
 
-        batch = {key: [] for key in self._dataset.keys()}
-        batch["image"] = []
-        for env_id_tensor in env_ids:
-            env_id = int(env_id_tensor.item())
-            ep_len = int(self.dataset_size[env_id].item())
-            end = int(torch.randint(batch_length, ep_len + 1, (1,)).item())
-            start = end - batch_length
-            for key, value in self._dataset.items():
-                batch[key].append(value[env_id, start : start + batch_length])
-            batch["image"].append(self._sample_image(env_id, start, batch_length))
-        out = {key: torch.stack(values, dim=0) for key, values in batch.items()}
+        sampled_lengths = self.dataset_size[env_ids]
+        max_start = sampled_lengths - batch_length
+        starts = (torch.rand(env_ids.numel(), device=self.device) * (max_start + 1).float()).long()
+        step_ids = starts.unsqueeze(1) + torch.arange(batch_length, device=self.device).unsqueeze(0)
+        env_grid = env_ids.unsqueeze(1)
+        out = {key: value[env_grid, step_ids] for key, value in self._dataset.items()}
+
+        image_shape = self._image_shape or ()
+        out["image"] = torch.zeros(
+            (env_ids.numel(), batch_length) + image_shape, device=self.device, dtype=torch.float32
+        )
+        camera_slots = self.env_to_camera_slot[env_ids]
+        has_camera = camera_slots >= 0
+        if self._dataset_image is not None:
+            slots = camera_slots[has_camera].unsqueeze(1)
+            out["image"][has_camera] = self._dataset_image[slots, step_ids[has_camera]]
         if "is_first" in out:
             out["is_first"].zero_()
             out["is_first"][:, 0] = 1.0
@@ -375,28 +410,26 @@ class WMPFixedEpisodeReplayBuffer:
         sampled_slots = torch.multinomial(probs, int(batch_size), replacement=True)
         env_ids = valid_envs[sampled_slots]
 
-        batch = {"forward_height_map": [], "prop": [], "image": []}
-        for env_id_tensor in env_ids:
-            env_id = int(env_id_tensor.item())
-            ep_len = int(self.dataset_size[env_id].item())
-            step_id = self._sample_real_depth_step(env_id, ep_len)
-            camera_slot = int(self.env_to_camera_slot[env_id].item())
-            batch["forward_height_map"].append(self._dataset["forward_height_map"][env_id, step_id])
-            batch["prop"].append(self._dataset["prop"][env_id, step_id])
-            batch["image"].append(self._dataset_image[camera_slot, step_id])
-        return {key: torch.stack(values, dim=0) for key, values in batch.items()}
+        step_ids = self._sample_real_depth_steps(env_ids)
+        camera_slots = self.env_to_camera_slot[env_ids]
+        return {
+            "forward_height_map": self._dataset["forward_height_map"][env_ids, step_ids],
+            "prop": self._dataset["prop"][env_ids, step_ids],
+            "image": self._dataset_image[camera_slots, step_ids],
+        }
 
-    def _init_storage(self, transition: dict[str, torch.Tensor]):
+    def _init_storage(self, transition: dict[str, torch.Tensor], batched: bool = False):
         self._current = {}
         self._dataset = {}
         for key, value in transition.items():
             if key == "image":
                 continue
-            shape = (self.num_envs, self.max_episode_steps) + tuple(value.shape)
+            item_shape = tuple(value.shape[1:]) if batched else tuple(value.shape)
+            shape = (self.num_envs, self.max_episode_steps) + item_shape
             self._current[key] = torch.zeros(shape, device=self.device, dtype=torch.float32)
             self._dataset[key] = torch.zeros(shape, device=self.device, dtype=torch.float32)
 
-        image_shape = tuple(transition["image"].shape)
+        image_shape = tuple(transition["image"].shape[1:]) if batched else tuple(transition["image"].shape)
         self._image_shape = image_shape
         camera_count = int(self.camera_env_ids.numel())
         if camera_count > 0:
@@ -404,19 +437,9 @@ class WMPFixedEpisodeReplayBuffer:
             self._current_image = torch.zeros(shape, device=self.device, dtype=torch.float32)
             self._dataset_image = torch.zeros(shape, device=self.device, dtype=torch.float32)
 
-    def _sample_image(self, env_id: int, start: int, batch_length: int) -> torch.Tensor:
-        if self._dataset_image is None:
-            if self._image_shape is None:
-                raise RuntimeError("WMP fixed replay image storage has not been initialized.")
-            return torch.zeros((batch_length,) + self._image_shape, device=self.device, dtype=torch.float32)
-        camera_slot = int(self.env_to_camera_slot[env_id].item())
-        if camera_slot >= 0:
-            return self._dataset_image[camera_slot, start : start + batch_length]
-        return torch.zeros_like(self._dataset_image[0, start : start + batch_length])
-
     def _ordered_unique_valid(self, ids: torch.Tensor | None) -> torch.Tensor:
         if ids is None:
-            return torch.empty(0, dtype=torch.long)
+            return torch.empty(0, device=self.device, dtype=torch.long)
         ids = torch.as_tensor(ids, device="cpu", dtype=torch.long).flatten()
         keep = torch.zeros(self.num_envs, dtype=torch.bool)
         out = []
@@ -425,48 +448,88 @@ class WMPFixedEpisodeReplayBuffer:
             if 0 <= env_id < self.num_envs and not bool(keep[env_id].item()):
                 keep[env_id] = True
                 out.append(env_id)
-        return torch.tensor(out, dtype=torch.long)
+        return torch.tensor(out, device=self.device, dtype=torch.long)
 
     def _make_depth_index_inverse(self, depth_index_inverse: torch.Tensor | None) -> torch.Tensor:
         if depth_index_inverse is not None:
-            inverse = torch.as_tensor(depth_index_inverse, device="cpu", dtype=torch.long).flatten()
+            inverse = torch.as_tensor(depth_index_inverse, device=self.device, dtype=torch.long).flatten()
             if inverse.numel() == self.num_envs:
                 return inverse.clone()
-        inverse = torch.full((self.num_envs,), -1, dtype=torch.long)
+        inverse = torch.full((self.num_envs,), -1, device=self.device, dtype=torch.long)
         if self.camera_env_ids.numel() > 0:
-            inverse[self.camera_env_ids] = torch.arange(self.camera_env_ids.numel(), dtype=torch.long)
+            inverse[self.camera_env_ids] = torch.arange(
+                self.camera_env_ids.numel(), device=self.device, dtype=torch.long
+            )
         return inverse
 
     def _valid_real_depth_envs_and_counts(self) -> tuple[torch.Tensor, torch.Tensor]:
         if self._dataset is None or self.depth_index_without_crawl_tilt.numel() == 0:
-            empty = torch.empty(0, dtype=torch.long)
+            empty = torch.empty(0, device=self.device, dtype=torch.long)
             return empty, empty
         has_real_depth = self._dataset.get("has_real_depth")
-        valid_envs = []
-        valid_counts = []
-        for env_id in self.depth_index_without_crawl_tilt.tolist():
-            env_id = int(env_id)
-            ep_len = int(self.dataset_size[env_id].item())
-            if ep_len <= 0:
-                continue
-            if has_real_depth is None:
-                valid_count = ep_len
-            else:
-                valid_mask = has_real_depth[env_id, :ep_len].reshape(ep_len, -1)[:, 0] > 0.5
-                valid_count = int(valid_mask.sum().item())
-            if valid_count > 0:
-                valid_envs.append(env_id)
-                valid_counts.append(valid_count)
-        return torch.tensor(valid_envs, dtype=torch.long), torch.tensor(valid_counts, dtype=torch.long)
-
-    def _sample_real_depth_step(self, env_id: int, ep_len: int) -> int:
-        has_real_depth = self._dataset.get("has_real_depth") if self._dataset is not None else None
+        env_ids = self.depth_index_without_crawl_tilt
+        lengths = self.dataset_size[env_ids]
         if has_real_depth is None:
-            return int(torch.randint(0, ep_len, (1,)).item())
-        valid_steps = (has_real_depth[env_id, :ep_len].reshape(ep_len, -1)[:, 0] > 0.5).nonzero(
-            as_tuple=False
-        ).flatten()
-        if valid_steps.numel() == 0:
-            return int(torch.randint(0, ep_len, (1,)).item())
-        slot = int(torch.randint(0, valid_steps.numel(), (1,)).item())
-        return int(valid_steps[slot].item())
+            counts = lengths
+        else:
+            steps = torch.arange(self.max_episode_steps, device=self.device).unsqueeze(0)
+            within_episode = steps < lengths.unsqueeze(1)
+            real_depth = has_real_depth[env_ids].reshape(env_ids.numel(), self.max_episode_steps, -1)[..., 0] > 0.5
+            counts = (within_episode & real_depth).sum(dim=1)
+        valid = counts > 0
+        return env_ids[valid], counts[valid]
+
+    def _sample_real_depth_steps(self, env_ids: torch.Tensor) -> torch.Tensor:
+        assert self._dataset is not None
+        lengths = self.dataset_size[env_ids]
+        has_real_depth = self._dataset.get("has_real_depth")
+        if has_real_depth is None:
+            return (torch.rand(env_ids.numel(), device=self.device) * lengths.float()).long()
+        valid = has_real_depth[env_ids].reshape(env_ids.numel(), self.max_episode_steps, -1)[..., 0] > 0.5
+        steps = torch.arange(self.max_episode_steps, device=self.device).unsqueeze(0)
+        valid &= steps < lengths.unsqueeze(1)
+        scores = torch.rand(valid.shape, device=self.device).masked_fill_(~valid, -1.0)
+        return scores.argmax(dim=1)
+
+    def _select_transition_batch(
+        self,
+        value: torch.Tensor,
+        env_ids: torch.Tensor,
+        valid: torch.Tensor,
+        input_count: int,
+    ) -> torch.Tensor:
+        value = value.detach()
+        if value.shape[0] == self.num_envs:
+            source_ids = env_ids.to(value.device)
+            value = value[source_ids]
+        elif value.shape[0] == input_count:
+            value = value[valid.to(value.device)]
+        else:
+            raise ValueError(
+                "Batched replay transition must be indexed by all envs or by the provided env_ids: "
+                f"value_batch={value.shape[0]}, num_envs={self.num_envs}, env_ids={input_count}."
+            )
+        return value.to(device=self.device, dtype=torch.float32)
+
+    def _select_transition_subset(
+        self,
+        value: torch.Tensor,
+        env_ids: torch.Tensor,
+        valid: torch.Tensor,
+        subset: torch.Tensor,
+        input_count: int,
+    ) -> torch.Tensor:
+        """Select a filtered subset before device transfer, notably for camera images."""
+        value = value.detach()
+        if value.shape[0] == self.num_envs:
+            source_ids = env_ids[subset].to(value.device)
+            value = value[source_ids]
+        elif value.shape[0] == input_count:
+            value = value[valid.to(value.device)]
+            value = value[subset.to(value.device)]
+        else:
+            raise ValueError(
+                "Batched replay transition must be indexed by all envs or by the provided env_ids: "
+                f"value_batch={value.shape[0]}, num_envs={self.num_envs}, env_ids={input_count}."
+            )
+        return value.to(device=self.device, dtype=torch.float32)

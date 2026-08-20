@@ -424,7 +424,7 @@ class B2RGBDFlatEnvCfg(B2FlatEnvCfg):
         self.scene.rgbd_camera.model_name = "wmp_front_depth"
         self.scene.rgbd_camera.camera_model = "pinhole"
         self.scene.rgbd_camera.spawn_offset_pos = (0.27, 0.0, 0.03)
-        self.scene.rgbd_camera.spawn_offset_rot = (1.0, 0.0, 0.0, 0.0)
+        self.scene.rgbd_camera.spawn_offset_rot = (0.0, 0.0, 0.0, 1.0)
         self.scene.rgbd_camera.width = 64
         self.scene.rgbd_camera.height = 64
         self.scene.rgbd_camera.depth_near = 0.0

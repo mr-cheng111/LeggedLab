@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""检查 RB160W 模型的初始关节角、关节限位和单关节运动方向。"""
+"""Inspect wheeled robot joint defaults, limits, and motion directions."""
 
 import argparse
 import math
@@ -13,7 +13,7 @@ from isaaclab.app import AppLauncher
 
 from legged_lab.utils import task_registry
 
-parser = argparse.ArgumentParser(description="Inspect RB160W model joint defaults and motion directions.")
+parser = argparse.ArgumentParser(description="Inspect wheeled robot joint defaults and motion directions.")
 parser.add_argument("--task", type=str, default="rb160w_flat", help="Task name.")
 parser.add_argument(
     "--mode",
@@ -24,8 +24,8 @@ parser.add_argument(
 parser.add_argument(
     "--joint",
     type=str,
-    default=".*_hip_joint",
-    help="Regex used by IsaacLab find_joints(). Examples: FR_hip_joint, .*_hip_joint, .*_thigh_joint.",
+    default=".*_hip.*_joint",
+    help="Regex used by IsaacLab find_joints(). Examples: FR_hip_joint, .*_hipx_joint, .*_thigh_joint.",
 )
 parser.add_argument("--amplitude", type=float, default=0.15, help="Sweep amplitude in radians.")
 parser.add_argument("--angle", type=float, default=0.15, help="Fixed joint angle offset in radians for --mode set.")
@@ -51,12 +51,14 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _default_urdf_path() -> Path:
-    return _repo_root() / "legged_lab/assets/xuanji/rb160w/urdf/RB160W_isaaclab_actuated.urdf"
+def _default_urdf_path(task_name: str) -> Path | None:
+    if task_name == "rb160w_flat":
+        return _repo_root() / "legged_lab/assets/xuanji/rb160w/urdf/RB160W_isaaclab_actuated.urdf"
+    return None
 
 
-def _read_urdf_axes(urdf_path: Path) -> dict[str, str]:
-    if not urdf_path.exists():
+def _read_urdf_axes(urdf_path: Path | None) -> dict[str, str]:
+    if urdf_path is None or not urdf_path.exists():
         return {}
     root = ET.parse(urdf_path).getroot()
     axes = {}
@@ -98,17 +100,20 @@ def _print_joint_table(env, urdf_axes: dict[str, str]):
     limits = env.robot.data.joint_pos_limits[0].detach().cpu()
     soft_limits = env.robot.data.soft_joint_pos_limits[0].detach().cpu()
 
-    print("\n[INFO] RB160W joint table")
+    print(f"\n[INFO] {args_cli.task} joint table")
     print("idx  joint_name          group     urdf_axis   default(rad)  default(deg)  current(rad)  limit(rad)           soft_limit(rad)")
     for idx, name in enumerate(names):
-        if "_hip_joint" in name:
-            group = "shoulder/hip"
-        elif "_thigh_joint" in name:
-            group = "hip_pitch"
-        elif "_calf_joint" in name:
-            group = "knee"
-        elif "_WHEEL_joint" in name:
+        name_lower = name.lower()
+        if "wheel" in name_lower:
             group = "wheel"
+        elif "hipx" in name_lower:
+            group = "hip_roll"
+        elif "hipy" in name_lower or "thigh" in name_lower:
+            group = "hip_pitch"
+        elif "knee" in name_lower or "calf" in name_lower:
+            group = "knee"
+        elif "_hip_joint" in name_lower:
+            group = "shoulder/hip"
         else:
             group = "other"
         print(
@@ -209,7 +214,7 @@ def _sweep_joints(env, joint_pattern: str, root_state: torch.Tensor | None):
 def main():
     env_cfg, _ = task_registry.get_cfgs(args_cli.task)
     _set_deterministic_reset(env_cfg)
-    urdf_path = Path(args_cli.urdf).expanduser() if args_cli.urdf else _default_urdf_path()
+    urdf_path = Path(args_cli.urdf).expanduser() if args_cli.urdf else _default_urdf_path(args_cli.task)
     urdf_axes = _read_urdf_axes(urdf_path)
 
     _log(f"constructing task={args_cli.task}")
@@ -223,7 +228,7 @@ def main():
             root_state[:, 7:] = 0.0
             _pin_root(env, root_state)
         _zero_model_steps(env, args_cli.settle_steps, root_state)
-        _log(f"URDF axis source: {urdf_path}")
+        _log(f"URDF axis source: {urdf_path if urdf_path is not None else 'not provided (USD metadata only)'}")
         _print_joint_table(env, urdf_axes)
         if root_state is not None:
             _log("root is pinned to the initial pose during inspection")
