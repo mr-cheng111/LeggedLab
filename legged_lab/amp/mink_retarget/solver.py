@@ -21,7 +21,14 @@ from .io import (
     WMPMotion,
 )
 from .mapping import RetargetMapping
-from .math_utils import angular_velocity_from_quat_wxyz, finite_difference, normalize_quat_wxyz, xyzw_to_wxyz
+from .math_utils import (
+    angular_velocity_from_quat_wxyz,
+    finite_difference,
+    normalize_quat_wxyz,
+    quat_conjugate_wxyz,
+    quat_rotate_wxyz,
+    xyzw_to_wxyz,
+)
 
 
 @dataclass
@@ -140,6 +147,7 @@ def _morphology_ratios(source_model: _MjcfModel, target_model: _MjcfModel, mappi
 
 def _build_frame_goals(
     target_root: np.ndarray,
+    target_root_quat_wxyz: np.ndarray,
     source_sites: dict[str, np.ndarray],
     target_neutral_sites: dict[str, np.ndarray],
     ratios: dict[str, float],
@@ -155,9 +163,13 @@ def _build_frame_goals(
         raise ValueError(f"Unsupported frame_target_mode={mapping.options.frame_target_mode!r}")
 
     goals: dict[str, np.ndarray] = {}
+    target_root_quat_wxyz = normalize_quat_wxyz(target_root_quat_wxyz)
+    inverse_root_quat = quat_conjugate_wxyz(target_root_quat_wxyz)
     for leg in ("FR", "FL", "RR", "RL"):
         source_hip = source_sites[f"{leg}_hip"]
-        target_hip = target_root + target_neutral_sites[f"{leg}_hip"]
+        target_hip = target_root + quat_rotate_wxyz(
+            target_root_quat_wxyz, target_neutral_sites[f"{leg}_hip"]
+        )
         goals[f"{leg}_hip"] = target_hip
         leg_axis_scale = (mapping.options.leg_axis_scale or {}).get(leg, (1.0, 1.0, 1.0))
         leg_axis_scale = np.asarray(leg_axis_scale, dtype=np.float64)
@@ -165,8 +177,12 @@ def _build_frame_goals(
             raise ValueError(f"retarget.leg_axis_scale[{leg!r}] must contain exactly three values.")
         for suffix in ("thigh", "calf", "foot"):
             key = f"{leg}_{suffix}"
-            rel = (source_sites[key] - source_hip) * leg_axis_scale
-            goals[key] = target_hip + rel * ratios.get(key, 1.0) * mapping.options.frame_position_scale
+            source_rel_body = quat_rotate_wxyz(inverse_root_quat, source_sites[key] - source_hip)
+            target_rel_body = source_rel_body * leg_axis_scale
+            target_rel_world = quat_rotate_wxyz(target_root_quat_wxyz, target_rel_body)
+            goals[key] = (
+                target_hip + target_rel_world * ratios.get(key, 1.0) * mapping.options.frame_position_scale
+            )
     return goals
 
 
@@ -284,6 +300,7 @@ def retarget_motion(
         target_root[2] += mapping.options.root_height_offset
         frame_goals = _build_frame_goals(
             target_root,
+            source_quat,
             sites,
             target_neutral_sites,
             morphology_ratios,

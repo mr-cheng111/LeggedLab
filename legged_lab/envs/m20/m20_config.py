@@ -309,10 +309,14 @@ class M20DepthRoughAMPAgentCfg(M20DepthRoughAgentCfg):
     runner_class_name: str = "legged_lab.runners.wmp_amp_runner:WMPAMPRunner"
     amp: dict = {
         "motion_files": [
-            "datasets/retargeted/m20/hop1.txt",
-            "datasets/retargeted/m20/hop2.txt",
-            "datasets/retargeted/m20/trot1.txt",
-            "datasets/retargeted/m20/trot2.txt",
+            "datasets/retargeted/m20/hop1_left.txt",
+            "datasets/retargeted/m20/hop1_right.txt",
+            "datasets/retargeted/m20/hop2_left.txt",
+            "datasets/retargeted/m20/hop2_right.txt",
+            "datasets/retargeted/m20/trot1_left.txt",
+            "datasets/retargeted/m20/trot1_right.txt",
+            "datasets/retargeted/m20/trot2_left.txt",
+            "datasets/retargeted/m20/trot2_right.txt",
         ],
         "canonical_obs_dim": 30,
         "retarget_adapter": {

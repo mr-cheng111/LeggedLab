@@ -219,11 +219,13 @@ conda run --no-capture-output -n mujoco \
   python legged_lab/scripts/retarget_amp_motion.py \
   --target_robot=m20 \
   --input_motion 'datasets/wmp_mocap_motions/*.txt' \
-  --debug_npz
+  --bilateral_variants
 ```
 
-输出位于 `datasets/retargeted/m20/`。M20 前腿和 A1 的屈曲方向相反，映射会镜像前腿
-局部 sagittal x 轨迹后再做 Mink IK；不要用逐关节复制替代该步骤。
+输出位于 `datasets/retargeted/m20/`。每个原始动作会生成保留左侧腿和保留右侧腿的两个
+对称版本（`*_left.txt` / `*_right.txt`），四个原始动作共得到八条 AMP 轨迹。M20 前腿和
+A1 的屈曲方向相反，映射会镜像前腿局部 sagittal x 轨迹后再做 Mink IK。左右镜像会自动
+估计并保留原始相位差，因此 hop 保持近似同相，trot 保持对角步态的半周期相位。
 
 小规模真相机训练 smoke：
 

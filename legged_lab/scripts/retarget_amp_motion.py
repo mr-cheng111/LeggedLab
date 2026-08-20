@@ -17,7 +17,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from legged_lab.amp.mink_retarget import load_mapping, load_wmp_motion, retarget_motion, save_wmp_motion
-from legged_lab.amp.mink_retarget.io import JOINT_POS, JOINT_VEL
+from legged_lab.amp.mink_retarget.io import JOINT_POS, JOINT_VEL, TOE_POS_LOCAL, WMPMotion
 
 
 DEFAULT_SOURCE_XML = "legged_lab/assets/unitree/a1/mjcf/a1_retarget.xml"
@@ -65,11 +65,85 @@ def _validate_static(args: argparse.Namespace, mapping) -> None:
         print(f"[OK] {input_path}: {motion.frames.shape[0]} frames, dt={motion.frame_duration}")
 
 
-def _output_path_for(input_path: Path, args: argparse.Namespace, multiple: bool) -> Path:
+def _output_path_for(input_path: Path, args: argparse.Namespace, multiple: bool, variant: str | None = None) -> Path:
     if args.output_motion and not multiple:
-        return Path(args.output_motion)
-    output_dir = Path(args.output_dir)
-    return output_dir / input_path.name
+        output_path = Path(args.output_motion)
+    else:
+        output_path = Path(args.output_dir) / input_path.name
+    if variant:
+        output_path = output_path.with_name(f"{output_path.stem}_{variant}{output_path.suffix}")
+    return output_path
+
+
+def _best_phase_lag(reference: np.ndarray, target: np.ndarray) -> int:
+    """Find the smallest signed lag that best aligns two periodic signals."""
+    reference = np.asarray(reference, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    reference = (reference - reference.mean()) / max(reference.std(), 1.0e-8)
+    target = (target - target.mean()) / max(target.std(), 1.0e-8)
+    max_lag = min(reference.shape[0] // 4, 100)
+    candidates = [
+        (float(np.mean((np.roll(reference, lag) - target) ** 2)), lag)
+        for lag in range(-max_lag, max_lag + 1)
+    ]
+    return min(candidates, key=lambda item: (item[0], abs(item[1])))[1]
+
+
+def _shift_without_wrap(values: np.ndarray, lag: int) -> np.ndarray:
+    """Shift a trajectory without moving its endpoint discontinuity into the middle."""
+    shifted = np.empty_like(values)
+    if lag > 0:
+        shifted[:lag] = values[0]
+        shifted[lag:] = values[:-lag]
+    elif lag < 0:
+        shifted[:lag] = values[-lag:]
+        shifted[lag:] = values[-1]
+    else:
+        shifted[:] = values
+    return shifted
+
+
+def _bilateral_variant(
+    motion: WMPMotion, source_joint_names: tuple[str, ...], retained_side: str
+) -> WMPMotion:
+    """Mirror one side's front/rear joints onto the other side."""
+    if retained_side not in {"left", "right"}:
+        raise ValueError(f"Unsupported retained_side={retained_side!r}.")
+
+    leg_indices: dict[str, list[int]] = {}
+    for leg in ("FR", "FL", "RR", "RL"):
+        indices = [index for index, name in enumerate(source_joint_names) if name.startswith(f"{leg}_")]
+        if len(indices) != 3:
+            raise ValueError(f"Expected three source joints for {leg}, got {indices}.")
+        leg_indices[leg] = indices
+
+    frames = motion.frames.copy()
+    joint_pos = frames[:, JOINT_POS].copy()
+    toe_z = motion.frames[:, TOE_POS_LOCAL].reshape(-1, 4, 3)[:, :, 2]
+    left_to_right_lags = {
+        "front": _best_phase_lag(toe_z[:, 1], toe_z[:, 0]),
+        "rear": _best_phase_lag(toe_z[:, 3], toe_z[:, 2]),
+    }
+    pairs = (
+        (("FL", "FR", left_to_right_lags["front"]), ("RL", "RR", left_to_right_lags["rear"]))
+        if retained_side == "left"
+        else (
+            ("FR", "FL", -left_to_right_lags["front"]),
+            ("RR", "RL", -left_to_right_lags["rear"]),
+        )
+    )
+    mirror_sign = np.array([-1.0, 1.0, 1.0], dtype=np.float64)
+    for donor_leg, receiver_leg, lag in pairs:
+        donor = joint_pos[:, leg_indices[donor_leg]].copy()
+        joint_pos[:, leg_indices[receiver_leg]] = _shift_without_wrap(donor, lag) * mirror_sign
+    frames[:, JOINT_POS] = joint_pos
+    frames[:, JOINT_VEL] = 0.0
+    return WMPMotion(
+        frames=frames,
+        frame_duration=motion.frame_duration,
+        motion_weight=motion.motion_weight,
+        loop_mode=motion.loop_mode,
+    )
 
 
 def _debug_path_for(output_path: Path, args: argparse.Namespace) -> Path | None:
@@ -129,6 +203,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gmr_components", type=int, default=8)
     parser.add_argument("--gmr_n_iter", type=int, default=100)
     parser.add_argument("--gmr_covariance_regularization", type=float, default=1.0e-4)
+    parser.add_argument(
+        "--bilateral_variants",
+        action="store_true",
+        help="Generate left- and right-retained symmetric variants for every input motion.",
+    )
     args = parser.parse_args()
     preset = TARGET_PRESETS[args.target_robot]
     args.target_xml = args.target_xml or preset["target_xml"]
@@ -163,41 +242,50 @@ def main() -> None:
         )
 
     for input_path in input_paths:
-        output_path = _output_path_for(input_path, args, multiple)
         motion = load_wmp_motion(input_path)
         if args.gmr_pre:
             assert gmr_plugin is not None
             motion = gmr_plugin.preprocess(motion)
-        result = retarget_motion(
-            motion,
-            source_xml=args.source_xml,
-            target_xml=args.target_xml,
-            mapping=mapping,
-            max_frames=args.max_frames,
+        variants = (
+            [
+                ("left", _bilateral_variant(motion, mapping.source.joints, "left")),
+                ("right", _bilateral_variant(motion, mapping.source.joints, "right")),
+            ]
+            if args.bilateral_variants
+            else [(None, motion)]
         )
-        if args.gmr_post:
-            assert gmr_plugin is not None
-            result.motion = gmr_plugin.postprocess(result.motion)
-        mean_foot_error, max_foot_error, max_joint_velocity = _validate_result(result, mapping, output_path)
-        save_wmp_motion(output_path, result.motion)
-        print(
-            "[OK] wrote "
-            f"{output_path} frames={result.motion.frames.shape[0]} "
-            f"foot_error_mean/max={mean_foot_error:.5f}/{max_foot_error:.5f} "
-            f"max_joint_velocity={max_joint_velocity:.3f}"
-        )
-
-        debug_path = _debug_path_for(output_path, args)
-        if debug_path is not None:
-            debug_path.parent.mkdir(parents=True, exist_ok=True)
-            np.savez_compressed(
-                debug_path,
-                source_feet_world=result.source_feet_world,
-                target_feet_world=result.target_feet_world,
-                foot_error=result.foot_error,
-                target_qpos=result.target_qpos,
+        for variant_name, variant_motion in variants:
+            output_path = _output_path_for(input_path, args, multiple, variant_name)
+            result = retarget_motion(
+                variant_motion,
+                source_xml=args.source_xml,
+                target_xml=args.target_xml,
+                mapping=mapping,
+                max_frames=args.max_frames,
             )
-            print(f"[OK] wrote debug {debug_path}")
+            if args.gmr_post:
+                assert gmr_plugin is not None
+                result.motion = gmr_plugin.postprocess(result.motion)
+            mean_foot_error, max_foot_error, max_joint_velocity = _validate_result(result, mapping, output_path)
+            save_wmp_motion(output_path, result.motion)
+            print(
+                "[OK] wrote "
+                f"{output_path} frames={result.motion.frames.shape[0]} "
+                f"foot_error_mean/max={mean_foot_error:.5f}/{max_foot_error:.5f} "
+                f"max_joint_velocity={max_joint_velocity:.3f}"
+            )
+
+            debug_path = _debug_path_for(output_path, args)
+            if debug_path is not None:
+                debug_path.parent.mkdir(parents=True, exist_ok=True)
+                np.savez_compressed(
+                    debug_path,
+                    source_feet_world=result.source_feet_world,
+                    target_feet_world=result.target_feet_world,
+                    foot_error=result.foot_error,
+                    target_qpos=result.target_qpos,
+                )
+                print(f"[OK] wrote debug {debug_path}")
 
 
 if __name__ == "__main__":
