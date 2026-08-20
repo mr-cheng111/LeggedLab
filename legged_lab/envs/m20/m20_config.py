@@ -188,7 +188,7 @@ class M20FlatAgentCfg(BaseAgentCfg):
         self.algorithm.entropy_coef = 0.003
         self.num_steps_per_env = 24
         self.max_iterations = 5000
-        self.save_interval = 100
+        self.save_interval = 500
 
 
 @configclass
@@ -291,7 +291,7 @@ class M20DepthRoughAgentCfg(M20RoughAgentCfg):
         self.algorithm.entropy_coef = 0.005
         self.num_steps_per_env = 24
         self.max_iterations = 20000
-        self.save_interval = 1000
+        self.save_interval = 500
         self.obs_groups = {"actor": ["policy", "wmp"], "critic": ["critic", "wmp"]}
 
 
