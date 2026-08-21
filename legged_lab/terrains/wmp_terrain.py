@@ -30,6 +30,7 @@ from scipy.ndimage import binary_dilation
 from scipy import interpolate
 
 import isaaclab.sim as sim_utils
+from isaaclab.terrains.terrain_generator import TerrainGenerator
 from isaaclab.terrains.terrain_importer import TerrainImporter
 
 if TYPE_CHECKING:
@@ -198,6 +199,64 @@ class WMPHeightFieldTerrainGenerator:
         for _ in range(2):
             center = (env_x + 2.0 + box_x / 2.0, env_y, crawl_height + box_z / 2.0)
             self.added_meshes.append(_box_mesh((box_x, self.cfg.size[1], box_z), center))
+
+
+class MixedTerrainGenerator(TerrainGenerator):
+    """Isaac Lab terrain generator that also exposes WMP column metadata."""
+
+    x_edge_mask = None
+
+    def __init__(self, cfg: TerrainGeneratorCfg, device: str = "cpu"):
+        for sub_cfg in cfg.sub_terrains.values():
+            if hasattr(sub_cfg, "kind"):
+                sub_cfg.horizontal_scale = cfg.horizontal_scale
+                sub_cfg.vertical_scale = cfg.vertical_scale
+                sub_cfg.slope_threshold = cfg.slope_threshold
+        self.col_names = _curriculum_col_names(cfg)
+        self.col_kinds = [name.removeprefix("wmp_") for name in self.col_names]
+        super().__init__(cfg, device)
+
+
+def _curriculum_col_names(cfg: TerrainGeneratorCfg) -> list[str]:
+    """Return the exact terrain configuration assigned to each curriculum column."""
+    proportions = np.asarray([sub_cfg.proportion for sub_cfg in cfg.sub_terrains.values()], dtype=np.float64)
+    if not np.isfinite(proportions).all() or np.any(proportions < 0.0) or float(proportions.sum()) <= 0.0:
+        raise ValueError(f"Invalid terrain proportions: {proportions.tolist()}")
+    proportions /= proportions.sum()
+    cumulative = np.cumsum(proportions)
+    names = list(cfg.sub_terrains)
+    return [
+        names[int(np.min(np.where(col / cfg.num_cols + 0.001 < cumulative)[0]))]
+        for col in range(cfg.num_cols)
+    ]
+
+
+def make_wmp_subterrain(difficulty: float, cfg) -> tuple[list[trimesh.Trimesh], np.ndarray]:
+    """Generate one WMP terrain tile through Isaac Lab's standard terrain API."""
+    from isaaclab.terrains import MeshPlaneTerrainCfg
+    from isaaclab.terrains.terrain_generator_cfg import TerrainGeneratorCfg
+
+    generator_cfg = TerrainGeneratorCfg(
+        class_type=WMPHeightFieldTerrainGenerator,
+        curriculum=False,
+        difficulty_range=(float(difficulty), float(difficulty)),
+        size=cfg.size,
+        border_width=0.0,
+        num_rows=1,
+        num_cols=1,
+        horizontal_scale=cfg.horizontal_scale,
+        vertical_scale=cfg.vertical_scale,
+        slope_threshold=cfg.slope_threshold,
+        use_cache=False,
+        sub_terrains={f"wmp_{cfg.kind}": MeshPlaneTerrainCfg(proportion=1.0)},
+    )
+    generator = WMPHeightFieldTerrainGenerator(generator_cfg)
+    mesh = generator.terrain_mesh.copy()
+    origin = generator.terrain_origins[0, 0].copy()
+    center_offset = np.asarray((cfg.size[0] * 0.5, cfg.size[1] * 0.5, 0.0), dtype=np.float64)
+    mesh.apply_translation(center_offset)
+    origin += center_offset
+    return [mesh], origin
 
 
 def _convert_heightfield_to_trimesh_with_x_edges(

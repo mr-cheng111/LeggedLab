@@ -212,6 +212,10 @@ python legged_lab/scripts/play.py \
 `joint_pos(12) + base_lin_vel_b(3) + base_ang_vel_b(3) + joint_vel(12)`。12 个关节严格按
 `M20_LEG_JOINT_NAMES` 排列，4 个连续转动轮关节不进入 AMP 判别器。
 
+M20 rough、depth rough 和 depth rough AMP 任务使用统一的全地形课程。它保留普通金字塔
+台阶、方块、随机起伏、波浪和高台，并加入 WMP wave、斜坡、上下楼梯、离散起伏、沟壑、
+攀爬、窄道和低矮通道；20 个 terrain 列保证每一种地形至少分配一列。
+
 使用已安装好 MuJoCo 和 Mink 的 `mujoco` 环境批量重定向原始 A1 motion：
 
 ```bash
