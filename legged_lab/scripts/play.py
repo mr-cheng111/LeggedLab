@@ -60,6 +60,37 @@ parser.add_argument("--enable_play_push", action="store_true", help="Keep interv
 parser.add_argument(
     "--hide_command", action="store_true", help="Hide command/current velocity debug visualization during play."
 )
+joystick_group = parser.add_mutually_exclusive_group()
+joystick_group.add_argument(
+    "--virtual_joystick",
+    dest="virtual_joystick",
+    action="store_true",
+    default=True,
+    help="Open the local desktop velocity controller (default).",
+)
+joystick_group.add_argument(
+    "--no_virtual_joystick",
+    dest="virtual_joystick",
+    action="store_false",
+    help="Disable the local desktop velocity controller.",
+)
+parser.add_argument("--joystick_port", type=int, default=8765, help="Local port for the virtual joystick page.")
+parser.add_argument(
+    "--joystick_max_vx", type=float, default=None, help="Maximum absolute joystick forward speed in m/s."
+)
+parser.add_argument(
+    "--joystick_max_vy", type=float, default=None, help="Maximum absolute joystick lateral speed in m/s."
+)
+parser.add_argument(
+    "--joystick_max_wz", type=float, default=None, help="Maximum absolute joystick yaw rate in rad/s."
+)
+parser.add_argument(
+    "--joystick_timeout",
+    type=float,
+    default=2.0,
+    help="Stop command after this many seconds without a joystick heartbeat.",
+)
+parser.add_argument("--no_open_joystick", action="store_true", help="Do not open the joystick desktop window.")
 parser.add_argument("--depth_point_stride", type=int, default=16, help="Pixel stride for depth hit point visualization.")
 parser.add_argument("--depth_point_max", type=int, default=300, help="Maximum depth hit points to draw.")
 parser.add_argument("--depth_point_size", type=float, default=5.0, help="Debug draw size of each red depth hit point.")
@@ -385,6 +416,19 @@ def play():
     env_class_name = args_cli.task
     env_cfg, agent_cfg = task_registry.get_cfgs(env_class_name)
 
+    command_ranges = env_cfg.commands.ranges
+    joystick_limits = (
+        args_cli.joystick_max_vx
+        if args_cli.joystick_max_vx is not None
+        else max(abs(float(command_ranges.lin_vel_x[0])), abs(float(command_ranges.lin_vel_x[1]))),
+        args_cli.joystick_max_vy
+        if args_cli.joystick_max_vy is not None
+        else max(abs(float(command_ranges.lin_vel_y[0])), abs(float(command_ranges.lin_vel_y[1]))),
+        args_cli.joystick_max_wz
+        if args_cli.joystick_max_wz is not None
+        else max(abs(float(command_ranges.ang_vel_z[0])), abs(float(command_ranges.ang_vel_z[1]))),
+    )
+
     env_cfg.noise.add_noise = False
     if not args_cli.enable_play_push:
         env_cfg.domain_rand.events.push_robot = None
@@ -406,6 +450,14 @@ def play():
         env_cfg.commands.ranges.lin_vel_y = (0.0, 0.0)
         env_cfg.commands.ranges.ang_vel_z = (0.0, 0.0)
         env_cfg.commands.ranges.heading = (0.0, 0.0)
+    if args_cli.virtual_joystick:
+        env_cfg.commands.ranges.lin_vel_x = (0.0, 0.0)
+        env_cfg.commands.ranges.lin_vel_y = (0.0, 0.0)
+        env_cfg.commands.ranges.ang_vel_z = (0.0, 0.0)
+        env_cfg.commands.ranges.heading = (0.0, 0.0)
+        env_cfg.commands.heading_command = False
+        env_cfg.commands.rel_standing_envs = 0.0
+        env_cfg.commands.rel_heading_envs = 0.0
     env_cfg.commands.debug_vis = not args_cli.hide_command
     env_cfg.scene.height_scanner.drift_range = (0.0, 0.0)
     if args_cli.play_render_interval is not None:
@@ -450,6 +502,9 @@ def play():
 
     env_class = task_registry.get_task_class(env_class_name)
     env = env_class(env_cfg, args_cli.headless)
+    if args_cli.virtual_joystick:
+        # Interactive playback resets only on explicit requests or safety terminations.
+        env.time_out_enabled = False
     if not args_cli.headless:
         # A depth-only Isaac RTX camera may globally disable color rendering when the Kit visualizer
         # is not recognized by its legacy has_gui check, leaving the interactive viewport black.
@@ -533,6 +588,25 @@ def play():
 
         keyboard = Keyboard(env)  # noqa:F841
 
+    joystick = None
+    joystick_window = None
+    if args_cli.virtual_joystick:
+        from legged_lab.utils.virtual_joystick import VirtualJoystickServer, open_joystick_window
+
+        joystick = VirtualJoystickServer(
+            port=args_cli.joystick_port,
+            max_vx=joystick_limits[0],
+            max_vy=joystick_limits[1],
+            max_wz=joystick_limits[2],
+            timeout=args_cli.joystick_timeout,
+        )
+        joystick.start()
+        env.set_command_override(torch.tensor(joystick.command(), device=env.device))
+        print(f"[INFO] Virtual joystick: {joystick.url}", flush=True)
+        if not args_cli.no_open_joystick:
+            joystick_window = open_joystick_window(joystick.url)
+            print(f"[INFO] Opened virtual joystick in {joystick_window}.", flush=True)
+
     obs = env.get_observations()
     depth_camera = env.scene.sensors.get("rgbd_camera") if args_cli.show_depth_points or args_cli.show_depth_image else None
     depth_draw = _acquire_debug_draw_interface() if args_cli.show_depth_points else None
@@ -549,59 +623,83 @@ def play():
     # The explicit window mode is displayed by a separate process so Kit and OpenCV do not load Qt in one process.
     depth_window_available = args_cli.depth_image_mode == "auto"
     play_step = 0
+    wmp_play_episode_steps = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
 
-    while simulation_app.is_running() and (args_cli.max_steps <= 0 or play_step < args_cli.max_steps):
+    try:
+        while simulation_app.is_running() and (args_cli.max_steps <= 0 or play_step < args_cli.max_steps):
 
-        with torch.inference_mode():
-            if args_cli.runner in ("wmp", "wmp_amp"):
-                wm_obs, wm_feature = runner.wmp_controller.observe_before_policy()
-                wm_feature = wm_feature.to(env.device)
-                obs["wmp"] = wm_feature
-            actions = policy(obs)
-            obs, rewards, dones, _ = env.step(actions)
-            if args_cli.runner in ("wmp", "wmp_amp"):
-                runner.wmp_controller.after_env_step(actions, rewards, dones, wm_obs)
-            if depth_camera is not None and args_cli.show_depth_image:
-                depth_window_available = _handle_wmp_depth_image(
-                    depth_camera,
-                    near=env_cfg.scene.rgbd_camera.depth_near,
-                    far=env_cfg.scene.rgbd_camera.depth_far,
-                    mode=args_cli.depth_image_mode,
-                    output_dir=depth_image_dir,
-                    step=depth_image_step,
-                    save_interval=args_cli.depth_image_save_interval,
-                    window_available=depth_window_available,
-                )
-                depth_image_step += 1
-            if depth_camera is not None and depth_draw is not None:
-                depth_points, depth_origins = _depth_to_hit_points(
-                    depth_camera,
-                    near=env_cfg.scene.rgbd_camera.depth_near,
-                    far=env_cfg.scene.rgbd_camera.depth_far,
-                    stride=args_cli.depth_point_stride,
-                    max_points=args_cli.depth_point_max,
-                    forward_min=args_cli.depth_point_forward_min,
-                    forward_max=args_cli.depth_point_forward_max,
-                    min_z=args_cli.depth_point_min_z,
-                    max_z=args_cli.depth_point_max_z,
-                    lift=args_cli.depth_point_lift,
-                    camera_index=args_cli.depth_point_camera_index,
-                )
-                _draw_depth_hit_points(depth_draw, depth_points, args_cli.depth_point_size)
-                if args_cli.depth_point_draw_rays:
-                    _draw_depth_rays(depth_draw, depth_origins, depth_points)
-                if args_cli.depth_point_debug and depth_debug_counter % 60 == 0:
-                    print(
-                        f"[INFO] Depth points: "
-                        f"{_depth_debug_stats(depth_camera, depth_points, depth_origins, args_cli.depth_point_camera_index)}",
-                        flush=True,
+            with torch.inference_mode():
+                if joystick is not None:
+                    env.set_command_override(torch.tensor(joystick.command(), device=env.device))
+                    if joystick.consume_reset():
+                        env.request_reset()
+                        print("[INFO] Virtual joystick requested robot reset.", flush=True)
+                if args_cli.runner in ("wmp", "wmp_amp"):
+                    wm_obs, wm_feature = runner.wmp_controller.observe_before_policy()
+                    wm_feature = wm_feature.to(env.device)
+                    obs["wmp"] = wm_feature
+                actions = policy(obs)
+                obs, rewards, dones, _ = env.step(actions)
+                if args_cli.runner in ("wmp", "wmp_amp"):
+                    wmp_dones = dones
+                    if joystick is not None:
+                        wmp_play_episode_steps += 1
+                        logical_time_outs = wmp_play_episode_steps >= int(env.max_episode_length)
+                        wmp_dones = dones | logical_time_outs
+                        wmp_play_episode_steps[wmp_dones] = 0
+                        if torch.any(logical_time_outs):
+                            command0 = env.command_generator.command[0].detach().cpu().tolist()
+                            print(
+                                "[INFO] Reset WMP episode state without resetting the robot; "
+                                f"command0=({command0[0]:.3f}, {command0[1]:.3f}, {command0[2]:.3f}).",
+                                flush=True,
+                            )
+                    runner.wmp_controller.after_env_step(actions, rewards, wmp_dones, wm_obs)
+                if depth_camera is not None and args_cli.show_depth_image:
+                    depth_window_available = _handle_wmp_depth_image(
+                        depth_camera,
+                        near=env_cfg.scene.rgbd_camera.depth_near,
+                        far=env_cfg.scene.rgbd_camera.depth_far,
+                        mode=args_cli.depth_image_mode,
+                        output_dir=depth_image_dir,
+                        step=depth_image_step,
+                        save_interval=args_cli.depth_image_save_interval,
+                        window_available=depth_window_available,
                     )
-                if not args_cli.headless:
-                    env.sim.render()
-                depth_debug_counter += 1
-            play_step += 1
-
-    env.close()
+                    depth_image_step += 1
+                if depth_camera is not None and depth_draw is not None:
+                    depth_points, depth_origins = _depth_to_hit_points(
+                        depth_camera,
+                        near=env_cfg.scene.rgbd_camera.depth_near,
+                        far=env_cfg.scene.rgbd_camera.depth_far,
+                        stride=args_cli.depth_point_stride,
+                        max_points=args_cli.depth_point_max,
+                        forward_min=args_cli.depth_point_forward_min,
+                        forward_max=args_cli.depth_point_forward_max,
+                        min_z=args_cli.depth_point_min_z,
+                        max_z=args_cli.depth_point_max_z,
+                        lift=args_cli.depth_point_lift,
+                        camera_index=args_cli.depth_point_camera_index,
+                    )
+                    _draw_depth_hit_points(depth_draw, depth_points, args_cli.depth_point_size)
+                    if args_cli.depth_point_draw_rays:
+                        _draw_depth_rays(depth_draw, depth_origins, depth_points)
+                    if args_cli.depth_point_debug and depth_debug_counter % 60 == 0:
+                        print(
+                            f"[INFO] Depth points: "
+                            f"{_depth_debug_stats(depth_camera, depth_points, depth_origins, args_cli.depth_point_camera_index)}",
+                            flush=True,
+                        )
+                    if not args_cli.headless:
+                        env.sim.render()
+                    depth_debug_counter += 1
+                play_step += 1
+    finally:
+        if joystick_window is not None:
+            joystick_window.close()
+        if joystick is not None:
+            joystick.stop()
+        env.close()
 
 
 if __name__ == "__main__":
