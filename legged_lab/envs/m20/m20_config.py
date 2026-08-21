@@ -9,7 +9,7 @@ from isaaclab.utils import configclass
 import legged_lab.mdp as mdp
 from legged_lab.assets.deeprobotics import M20_CFG
 from legged_lab.envs.base.base_env_config import BaseAgentCfg, BaseEnvCfg, RewardCfg
-from legged_lab.terrains import ROUGH_TERRAINS_CFG
+from legged_lab.terrains import M20_ALL_TERRAINS_CFG
 
 
 M20_LEG_JOINT_NAMES = [
@@ -196,7 +196,7 @@ class M20RoughEnvCfg(M20FlatEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.scene.terrain_type = "generator"
-        self.scene.terrain_generator = ROUGH_TERRAINS_CFG
+        self.scene.terrain_generator = M20_ALL_TERRAINS_CFG
         self.scene.max_init_terrain_level = 0
         self.scene.terrain_curriculum.enabled = True
         self.scene.terrain_curriculum.schedule = (0.0, 15000.0, 0.0, 9.0)

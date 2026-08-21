@@ -19,10 +19,25 @@ inherit from ``isaaclab.terrains.terrains_cfg.TerrainConfig`` and define the fol
   and the configuration parameters and return a `tuple with the `trimesh`` mesh object and terrain origin.
 """
 
+from dataclasses import MISSING
+
 import isaaclab.terrains as terrain_gen
 from isaaclab.terrains.terrain_generator_cfg import TerrainGeneratorCfg
+from isaaclab.terrains.sub_terrain_cfg import SubTerrainBaseCfg
+from isaaclab.utils.configclass import configclass
 
-from .wmp_terrain import WMPHeightFieldTerrainGenerator
+from .wmp_terrain import MixedTerrainGenerator, WMPHeightFieldTerrainGenerator, make_wmp_subterrain
+
+
+@configclass
+class WMPSubTerrainCfg(SubTerrainBaseCfg):
+    """WMP terrain exposed as an Isaac Lab sub-terrain."""
+
+    function = make_wmp_subterrain
+    kind: str = MISSING
+    horizontal_scale: float = 0.1
+    vertical_scale: float = 0.005
+    slope_threshold: float | None = 0.75
 
 
 def make_single_terrain_cfg(name: str, sub_terrain, difficulty: float = 0.7) -> TerrainGeneratorCfg:
@@ -123,6 +138,49 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
         # "gap": terrain_gen.MeshGapTerrainCfg(
         #     proportion=0.15, gap_width_range=(0.1, 0.4), platform_width=2.0
         # )
+    },
+)
+
+
+def _copy_with_proportion(sub_terrain, proportion: float):
+    copied = sub_terrain.copy()
+    copied.proportion = proportion
+    return copied
+
+
+M20_ALL_TERRAINS_CFG = TerrainGeneratorCfg(
+    class_type=MixedTerrainGenerator,
+    curriculum=True,
+    difficulty_range=(0.0, 1.0),
+    size=(8.0, 8.0),
+    border_width=25.0,
+    num_rows=10,
+    num_cols=20,
+    horizontal_scale=0.1,
+    vertical_scale=0.005,
+    slope_threshold=0.75,
+    use_cache=False,
+    sub_terrains={
+        # Preserve every terrain from ROUGH_TERRAINS_CFG.
+        "pyramid_stairs_28": _copy_with_proportion(ROUGH_TERRAINS_CFG.sub_terrains["pyramid_stairs_28"], 0.05),
+        "pyramid_stairs_30": _copy_with_proportion(ROUGH_TERRAINS_CFG.sub_terrains["pyramid_stairs_30"], 0.05),
+        "pyramid_stairs_32": _copy_with_proportion(ROUGH_TERRAINS_CFG.sub_terrains["pyramid_stairs_32"], 0.05),
+        "pyramid_stairs_34": _copy_with_proportion(ROUGH_TERRAINS_CFG.sub_terrains["pyramid_stairs_34"], 0.05),
+        "boxes": _copy_with_proportion(ROUGH_TERRAINS_CFG.sub_terrains["boxes"], 0.05),
+        "random_rough": _copy_with_proportion(ROUGH_TERRAINS_CFG.sub_terrains["random_rough"], 0.05),
+        "wave": _copy_with_proportion(ROUGH_TERRAINS_CFG.sub_terrains["wave"], 0.05),
+        "high_platform": _copy_with_proportion(ROUGH_TERRAINS_CFG.sub_terrains["high_platform"], 0.05),
+        # One column per special terrain, with a second column for gap and climb.
+        "wmp_wave": WMPSubTerrainCfg(proportion=0.05, kind="wave"),
+        "wmp_slope": WMPSubTerrainCfg(proportion=0.05, kind="slope"),
+        "wmp_stair_up": WMPSubTerrainCfg(proportion=0.05, kind="stair_up"),
+        "wmp_stair_down": WMPSubTerrainCfg(proportion=0.05, kind="stair_down"),
+        "wmp_discrete": WMPSubTerrainCfg(proportion=0.05, kind="discrete"),
+        "wmp_gap": WMPSubTerrainCfg(proportion=0.10, kind="gap"),
+        "wmp_climb": WMPSubTerrainCfg(proportion=0.10, kind="climb"),
+        "wmp_tilt": WMPSubTerrainCfg(proportion=0.05, kind="tilt"),
+        "wmp_crawl": WMPSubTerrainCfg(proportion=0.05, kind="crawl"),
+        "wmp_rough_flat": WMPSubTerrainCfg(proportion=0.05, kind="rough_flat"),
     },
 )
 
