@@ -85,12 +85,13 @@ retarget:
   frame_pos_cost: 1.0
   foot_pos_cost: 4.0
   root_cost: 2.0
-  # The physical M20 folds inward: front knees point backward and hind knees
-  # point forward. A1 uses the backward branch on all four legs, so mirror the
-  # source sagittal x trajectory only for the two hind legs.
-  leg_axis_scale:
-    RR: [-1.0, 1.0, 1.0]
-    RL: [-1.0, 1.0, 1.0]
+  # Mirror only the hind-leg intermediate targets to guide the inward fold.
+  # Keep the foot targets unmodified so their stance sweep still drives forward.
+  frame_axis_scale:
+    RR_thigh: [-1.0, 1.0, 1.0]
+    RR_calf: [-1.0, 1.0, 1.0]
+    RL_thigh: [-1.0, 1.0, 1.0]
+    RL_calf: [-1.0, 1.0, 1.0]
   neutral_joint_pos:
     fl_hipx_joint: 0.0
     fl_hipy_joint: 0.3
@@ -104,7 +105,7 @@ retarget:
     hr_hipx_joint: 0.0
     hr_hipy_joint: -0.3
     hr_knee_joint: 0.6
-  # Keep every generated frame on the inward-bending IK branch.
+  # Enforce the inward-bending IK branch during every solver iteration.
   joint_branch_signs:
     fl_hipy_joint: 1
     fl_knee_joint: -1

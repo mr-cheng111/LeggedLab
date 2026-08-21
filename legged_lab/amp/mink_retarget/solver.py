@@ -100,12 +100,28 @@ def _neutral_qpos(model: _MjcfModel, joint_values: dict[str, float] | None = Non
 
 def _joint_project_limits(model: _MjcfModel, mapping: RetargetMapping) -> list[tuple[int, float, float]]:
     limits = mapping.options.joint_project_limits or {}
+    branch_signs = mapping.options.joint_branch_signs or {}
+    known_joints = set(model.mapping.joints)
+    unknown_branch_joints = sorted(set(branch_signs) - known_joints)
+    if unknown_branch_joints:
+        raise ValueError(f"joint_branch_signs references unknown target joints: {unknown_branch_joints}")
+
     projected = []
     for name, addr in zip(model.mapping.joints, model.joint_qpos_addrs):
-        if name not in limits:
+        if name not in limits and name not in branch_signs:
             continue
-        lower, upper = limits[name]
-        projected.append((addr, float(lower), float(upper)))
+        lower, upper = limits.get(name, (-np.inf, np.inf))
+        lower, upper = float(lower), float(upper)
+        expected_sign = branch_signs.get(name)
+        if expected_sign == 1:
+            lower = max(lower, 0.0)
+        elif expected_sign == -1:
+            upper = min(upper, 0.0)
+        elif expected_sign is not None:
+            raise ValueError(f"joint_branch_signs[{name!r}] must be -1 or 1, got {expected_sign!r}.")
+        if lower > upper:
+            raise ValueError(f"Empty projected range for {name}: [{lower}, {upper}]")
+        projected.append((addr, lower, upper))
     return projected
 
 
@@ -171,14 +187,18 @@ def _build_frame_goals(
             target_root_quat_wxyz, target_neutral_sites[f"{leg}_hip"]
         )
         goals[f"{leg}_hip"] = target_hip
-        leg_axis_scale = (mapping.options.leg_axis_scale or {}).get(leg, (1.0, 1.0, 1.0))
-        leg_axis_scale = np.asarray(leg_axis_scale, dtype=np.float64)
-        if leg_axis_scale.shape != (3,):
+        default_axis_scale = (mapping.options.leg_axis_scale or {}).get(leg, (1.0, 1.0, 1.0))
+        default_axis_scale = np.asarray(default_axis_scale, dtype=np.float64)
+        if default_axis_scale.shape != (3,):
             raise ValueError(f"retarget.leg_axis_scale[{leg!r}] must contain exactly three values.")
         for suffix in ("thigh", "calf", "foot"):
             key = f"{leg}_{suffix}"
+            axis_scale = (mapping.options.frame_axis_scale or {}).get(key, default_axis_scale)
+            axis_scale = np.asarray(axis_scale, dtype=np.float64)
+            if axis_scale.shape != (3,):
+                raise ValueError(f"retarget.frame_axis_scale[{key!r}] must contain exactly three values.")
             source_rel_body = quat_rotate_wxyz(inverse_root_quat, source_sites[key] - source_hip)
-            target_rel_body = source_rel_body * leg_axis_scale
+            target_rel_body = source_rel_body * axis_scale
             target_rel_world = quat_rotate_wxyz(target_root_quat_wxyz, target_rel_body)
             goals[key] = (
                 target_hip + target_rel_world * ratios.get(key, 1.0) * mapping.options.frame_position_scale
@@ -283,6 +303,8 @@ def retarget_motion(
     foot_keys = ("FR_foot", "FL_foot", "RR_foot", "RL_foot")
     neutral_qpos = _neutral_qpos(target_model, mapping.options.neutral_joint_pos)
     project_limits = _joint_project_limits(target_model, mapping)
+    configuration.update(neutral_qpos)
+    _project_configuration(configuration, project_limits)
     _set_model_qpos(target_model, neutral_qpos)
     target_neutral_sites = target_model.sites()
     morphology_ratios = _morphology_ratios(source_model, target_model, mapping)

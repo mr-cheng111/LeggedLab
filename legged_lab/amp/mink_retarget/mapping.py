@@ -36,6 +36,7 @@ class RetargetOptions:
     neutral_joint_pos: dict[str, float] | None = None
     joint_project_limits: dict[str, tuple[float, float] | list[float]] | None = None
     leg_axis_scale: dict[str, tuple[float, float, float] | list[float]] | None = None
+    frame_axis_scale: dict[str, tuple[float, float, float] | list[float]] | None = None
     joint_branch_signs: dict[str, int] | None = None
 
 
