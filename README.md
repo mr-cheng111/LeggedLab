@@ -223,8 +223,9 @@ conda run --no-capture-output -n mujoco \
 ```
 
 输出位于 `datasets/retargeted/m20/`。每个原始动作会生成保留左侧腿和保留右侧腿的两个
-对称版本（`*_left.txt` / `*_right.txt`），四个原始动作共得到八条 AMP 轨迹。M20 前腿和
-A1 的屈曲方向相反，映射会镜像前腿局部 sagittal x 轨迹后再做 Mink IK。左右镜像会自动
+对称版本（`*_left.txt` / `*_right.txt`），四个原始动作共得到八条 AMP 轨迹。M20 使用
+向内屈曲姿态（前膝向后、后膝向前）；映射保留 A1 前腿分支，并镜像后腿局部 sagittal x
+轨迹后再做 Mink IK。生成时会检查所有髋俯仰和膝关节均未跳回外张 IK 分支。左右镜像会自动
 估计并保留原始相位差，因此 hop 保持近似同相，trot 保持对角步态的半周期相位。
 
 小规模真相机训练 smoke：
@@ -266,6 +267,29 @@ python legged_lab/scripts/play.py --task=m20_flat --num_envs=1 --hide_command
 python legged_lab/scripts/inspect_rb160w_model.py --task=m20_flat --mode=print --headless
 python legged_lab/scripts/inspect_rb160w_model.py --task=m20_flat --mode=sweep --joint=".*_hipx_joint"
 ```
+
+使用本机虚拟摇杆播放 M20 WMP-AMP checkpoint：
+
+```bash
+conda run --no-capture-output -n isaaclab3 \
+  python legged_lab/scripts/play.py \
+  --task=m20_depth_rough_amp \
+  --runner=wmp_amp \
+  --num_envs=1 \
+  --viz=kit \
+  --load_run=2026-08-20_11-32-07_m20_wmp_amp_original_strength_v1 \
+  --checkpoint=model_2000.pt
+```
+
+控制面板默认开启，以独立桌面窗口和隔离的临时 profile 启动，只监听 `127.0.0.1:8765`。
+左摇杆控制 `vx/vy`，右侧
+横杆控制 `wz`；键盘 `W/S` 控制前后、`A/D` 控制左右、`Q/E` 控制旋转。键盘按住时
+速度连续增加，松开后平滑回零；这是按住时间生成的无极速度，不依赖键盘型号。窗口失焦
+或控制心跳中断 2 秒时命令归零，目标速度以 50 Hz 上传。播放不会在固定时长后自动复位，
+使用面板上的“复位机器人”按钮手动复位。播放达到训练 episode 时长时只重置 WMP 内部状态，
+不复位机器人，也不会
+中断控制面板。默认最大值取自任务训练配置，也可用 `--joystick_max_vx`、
+`--joystick_max_vy` 和 `--joystick_max_wz` 单独限制；使用 `--no_virtual_joystick` 可关闭面板。
 
 ## Use Your Own Robot
 

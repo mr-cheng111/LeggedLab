@@ -179,6 +179,23 @@ def _validate_result(result, mapping, output_path: Path) -> tuple[float, float, 
     if violations:
         raise ValueError(f"{output_path} violates target joint limits: {'; '.join(violations)}")
 
+    branch_violations = []
+    branch_signs = mapping.options.joint_branch_signs or {}
+    target_joint_indices = {name: index for index, name in enumerate(mapping.target.joints)}
+    for joint_name, expected_sign in branch_signs.items():
+        if expected_sign not in (-1, 1):
+            raise ValueError(f"joint_branch_signs[{joint_name!r}] must be -1 or 1, got {expected_sign!r}.")
+        if joint_name not in target_joint_indices:
+            raise ValueError(f"joint_branch_signs references unknown target joint {joint_name!r}.")
+        values = joint_pos[:, target_joint_indices[joint_name]] * expected_sign
+        wrong_count = int(np.count_nonzero(values < -1.0e-6))
+        if wrong_count:
+            branch_violations.append(
+                f"{joint_name} wrong_sign={wrong_count}/{values.size}, signed_min={values.min():.4f}"
+            )
+    if branch_violations:
+        raise ValueError(f"{output_path} leaves the required IK branch: {'; '.join(branch_violations)}")
+
     mean_foot_error = float(np.mean(result.foot_error))
     max_foot_error = float(np.max(result.foot_error))
     max_joint_velocity = float(np.max(np.abs(frames[:, JOINT_VEL])))

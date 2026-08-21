@@ -17,7 +17,6 @@ from collections.abc import Callable
 
 import carb
 import omni
-import torch
 from isaaclab.devices.device_base import DeviceBase
 
 from legged_lab.envs.base.base_env import BaseEnv
@@ -79,7 +78,7 @@ class Keyboard(DeviceBase):
         if event.type == carb.input.KeyboardEventType.KEY_PRESS:
             if event.input.name in self._INPUT_KEY_MAPPING:
                 if event.input.name == "R":
-                    self.env.episode_length_buf = torch.ones_like(self.env.episode_length_buf) * 1e6
+                    self.env.request_reset()
 
         # since no error, we are fine :)
         return True

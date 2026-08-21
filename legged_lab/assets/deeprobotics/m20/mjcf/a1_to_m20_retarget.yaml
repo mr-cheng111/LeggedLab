@@ -85,24 +85,35 @@ retarget:
   frame_pos_cost: 1.0
   foot_pos_cost: 4.0
   root_cost: 2.0
-  # M20 front legs fold forward, while A1 front legs use the same sagittal
-  # branch as its rear legs. Mirror source x only for the two front legs.
+  # The physical M20 folds inward: front knees point backward and hind knees
+  # point forward. A1 uses the backward branch on all four legs, so mirror the
+  # source sagittal x trajectory only for the two hind legs.
   leg_axis_scale:
-    FR: [-1.0, 1.0, 1.0]
-    FL: [-1.0, 1.0, 1.0]
+    RR: [-1.0, 1.0, 1.0]
+    RL: [-1.0, 1.0, 1.0]
   neutral_joint_pos:
     fl_hipx_joint: 0.0
-    fl_hipy_joint: -0.3
-    fl_knee_joint: 0.6
+    fl_hipy_joint: 0.3
+    fl_knee_joint: -0.6
     fr_hipx_joint: 0.0
-    fr_hipy_joint: -0.3
-    fr_knee_joint: 0.6
+    fr_hipy_joint: 0.3
+    fr_knee_joint: -0.6
     hl_hipx_joint: 0.0
-    hl_hipy_joint: 0.3
-    hl_knee_joint: -0.6
+    hl_hipy_joint: -0.3
+    hl_knee_joint: 0.6
     hr_hipx_joint: 0.0
-    hr_hipy_joint: 0.3
-    hr_knee_joint: -0.6
+    hr_hipy_joint: -0.3
+    hr_knee_joint: 0.6
+  # Keep every generated frame on the inward-bending IK branch.
+  joint_branch_signs:
+    fl_hipy_joint: 1
+    fl_knee_joint: -1
+    fr_hipy_joint: 1
+    fr_knee_joint: -1
+    hl_hipy_joint: -1
+    hl_knee_joint: 1
+    hr_hipy_joint: -1
+    hr_knee_joint: 1
   joint_project_limits:
     fl_hipx_joint: [-0.436, 0.611]
     fl_hipy_joint: [-2.583, 2.286]

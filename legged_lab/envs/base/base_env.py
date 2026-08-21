@@ -136,6 +136,7 @@ class BaseEnv(VecEnv):
             ranges=self.cfg.commands.ranges,
         )
         self.command_generator = UniformVelocityCommand(cfg=command_cfg, env=self)
+        self._command_override = None
         self.reward_manager = RewardManager(self.cfg.reward, self)
         self.reward_curriculum_coef = self._init_reward_curriculum_coef()
         self.terrain_curriculum_max_level = self._terrain_curriculum_allowed_level(0)
@@ -309,6 +310,7 @@ class BaseEnv(VecEnv):
 
         self.max_episode_length_s = self.cfg.scene.max_episode_length_s
         self.max_episode_length = np.ceil(self.max_episode_length_s / self.step_dt)
+        self.time_out_enabled = True
         self.num_actions = self.robot.data.default_joint_pos.shape[1]
         self.clip_actions = self.cfg.normalization.clip_actions
         self.clip_obs = self.cfg.normalization.clip_observations
@@ -353,6 +355,7 @@ class BaseEnv(VecEnv):
         self.add_noise = self.cfg.noise.add_noise
 
         self.episode_length_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
+        self._manual_reset_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self.sim_step_counter = 0
         self.time_out_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self._init_wmp_privileged_buffers()
@@ -496,6 +499,7 @@ class BaseEnv(VecEnv):
 
         self.episode_length_buf += 1
         self.command_generator.compute(self.step_dt)
+        self._apply_command_override()
         if "interval" in self.event_manager.available_modes:
             self.event_manager.apply(mode="interval", dt=self.step_dt)
         self._update_wmp_depth_buffer()
@@ -506,6 +510,7 @@ class BaseEnv(VecEnv):
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         terminal_amp_states = self.get_amp_observations()[env_ids]
         self.reset(env_ids)
+        self._apply_command_override()
         if self.cfg.robot.terminate_on_wmp_velocity_violation and self.wmp_vel_violate_buf is not None:
             self.extras.setdefault("log", {})["wmp_vel_violate"] = self.wmp_vel_violate_buf.float().mean()
         if self.cfg.robot.terminate_on_wmp_fall and self.wmp_fall_buf is not None:
@@ -519,6 +524,32 @@ class BaseEnv(VecEnv):
         self.extras["time_outs"] = self.time_out_buf
 
         return obs, reward_buf, self.reset_buf, self.extras
+
+    def set_command_override(self, command: torch.Tensor | None) -> None:
+        """Override generated SE(2) commands until explicitly cleared."""
+        if command is None:
+            self._command_override = None
+            return
+        command = torch.as_tensor(command, device=self.device, dtype=self.command_generator.command.dtype)
+        if command.shape == (3,):
+            command = command.unsqueeze(0).expand(self.num_envs, -1)
+        if command.shape != (self.num_envs, 3):
+            raise ValueError(
+                f"command override must have shape (3,) or ({self.num_envs}, 3), got {tuple(command.shape)}"
+            )
+        self._command_override = command.clone()
+        self._apply_command_override()
+
+    def _apply_command_override(self) -> None:
+        if self._command_override is not None:
+            self.command_generator.command.copy_(self._command_override)
+
+    def request_reset(self, env_ids: torch.Tensor | None = None) -> None:
+        """Request a regular done/reset transition on the next environment step."""
+        if env_ids is None:
+            self._manual_reset_buf.fill_(True)
+        else:
+            self._manual_reset_buf[env_ids] = True
 
     def get_depth_observations(self):
         if self.rgbd_camera is None:
@@ -706,11 +737,15 @@ class BaseEnv(VecEnv):
             reset_buf |= fall
         self.wmp_vel_violate_buf = vel_violate
         self.wmp_fall_buf = fall
-        if self.cfg.robot.wmp_time_out_strictly_greater:
+        if not self.time_out_enabled:
+            time_out_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        elif self.cfg.robot.wmp_time_out_strictly_greater:
             time_out_buf = self.episode_length_buf > self.max_episode_length
         else:
             time_out_buf = self.episode_length_buf >= self.max_episode_length
         reset_buf |= time_out_buf
+        reset_buf |= self._manual_reset_buf
+        self._manual_reset_buf.zero_()
         return reset_buf, time_out_buf
 
     def init_obs_buffer(self):
