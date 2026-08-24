@@ -150,7 +150,16 @@ class WMPHeightFieldTerrainGenerator:
         elif kind == "crawl":
             self._add_wmp_crawl_mesh(row, col, difficulty)
         elif kind == "rough_flat":
-            _random_uniform_terrain(terrain, self.cfg.horizontal_scale, self.cfg.vertical_scale)
+            # Scale roughness only with curriculum difficulty: level zero is
+            # exactly planar and full difficulty reaches +/- 5 cm.
+            roughness = 0.05 * difficulty
+            _random_uniform_terrain(
+                terrain,
+                self.cfg.horizontal_scale,
+                self.cfg.vertical_scale,
+                min_height=-roughness,
+                max_height=roughness,
+            )
         else:
             raise ValueError(f"Unsupported WMP terrain kind: {kind}")
 

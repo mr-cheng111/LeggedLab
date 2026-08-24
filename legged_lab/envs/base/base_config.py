@@ -274,6 +274,9 @@ class DomainRandCfg:
 @configclass
 class PhysxCfg:
     gpu_max_rigid_patch_count: int = 10 * 2**15
+    # Complex WMP terrain contacts can exceed Isaac Lab's 2**26 default at
+    # 4096 environments. Allocate a 128 MiB GPU collision stack instead.
+    gpu_collision_stack_size: int = 2**27
 
 
 @configclass

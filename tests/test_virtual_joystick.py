@@ -54,6 +54,9 @@ class VirtualJoystickServerTest(unittest.TestCase):
         self.assertIn("keyboardFallRate = 3.5", page)
         self.assertIn("requestAnimationFrame(updateKeyboard)", page)
         self.assertIn("setInterval(send, 20)", page)
+        self.assertIn("键盘控制", page)
+        self.assertNotIn('id="linear"', page)
+        self.assertNotIn('id="turn"', page)
 
         with urllib.request.urlopen(f"{self.server.url}/api/state", timeout=1.0) as response:
             state = json.load(response)

@@ -58,7 +58,10 @@ class BaseEnv(VecEnv):
             device=cfg.device,
             dt=cfg.sim.dt,
             render_interval=self.render_interval,
-            physx=PhysxCfg(gpu_max_rigid_patch_count=cfg.sim.physx.gpu_max_rigid_patch_count),
+            physx=PhysxCfg(
+                gpu_max_rigid_patch_count=cfg.sim.physx.gpu_max_rigid_patch_count,
+                gpu_collision_stack_size=cfg.sim.physx.gpu_collision_stack_size,
+            ),
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 friction_combine_mode="multiply",
                 restitution_combine_mode="multiply",

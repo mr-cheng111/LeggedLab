@@ -30,6 +30,7 @@ def main() -> None:
     title = "Depth Image"
     last_mtime_ns = -1
     window_created = False
+    image = None
 
     try:
         while _parent_is_alive(args.parent_pid):
@@ -44,10 +45,13 @@ def main() -> None:
                             cv2.namedWindow(title, cv2.WINDOW_NORMAL)
                             cv2.resizeWindow(title, 320, 320)
                             window_created = True
-                        cv2.imshow(title, image)
                         last_mtime_ns = mtime_ns
 
             if window_created:
+                _, _, width, height = cv2.getWindowImageRect(title)
+                if image is not None and width > 0 and height > 0:
+                    display_image = cv2.resize(image, (width, height), interpolation=cv2.INTER_NEAREST)
+                    cv2.imshow(title, display_image)
                 if cv2.waitKey(1) & 0xFF in (27, ord("q")):
                     break
                 if cv2.getWindowProperty(title, cv2.WND_PROP_VISIBLE) < 1:

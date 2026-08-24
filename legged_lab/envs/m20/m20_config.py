@@ -231,7 +231,9 @@ class M20DepthRoughEnvCfg(M20RoughEnvCfg):
         self.scene.rgbd_camera.camera_model = "pinhole"
         self.scene.rgbd_camera.spawn_prim_path = "base_link/depth_camera"
         self.scene.rgbd_camera.spawn_offset_pos = (0.38, 0.0, 0.10)
-        self.scene.rgbd_camera.spawn_offset_rot = (0.0, 0.0, 0.0, 1.0)
+        # Quaternion order is wxyz. The previous (0, 0, 0, 1) was a 180-degree
+        # yaw that pointed the camera backward; identity faces robot-forward.
+        self.scene.rgbd_camera.spawn_offset_rot = (1.0, 0.0, 0.0, 0.0)
         self.scene.rgbd_camera.width = 64
         self.scene.rgbd_camera.height = 64
         self.scene.rgbd_camera.depth_near = 0.05
@@ -296,8 +298,39 @@ class M20DepthRoughAgentCfg(M20RoughAgentCfg):
 
 
 @configclass
+class M20DepthRoughAMPRewardCfg(M20RewardCfg):
+    """Stage-2 rewards for adding leg assistance on WMP terrain."""
+
+    # Keep rolling as the default behavior. Leg motion is made affordable, but
+    # wheel air time is not globally rewarded because it caused needless gaiting.
+    wheel_contact_count = RewTerm(
+        func=mdp.feet_contact_count,
+        weight=0.10,
+        params={"sensor_cfg": SceneEntityCfg("contact_sensor", body_names=M20_WHEEL_BODIES), "threshold": 1.0},
+    )
+    wheel_air_time = RewTerm(
+        func=mdp.feet_air_time_quadruped,
+        weight=0.0,
+        params={"sensor_cfg": SceneEntityCfg("contact_sensor", body_names=M20_WHEEL_BODIES), "threshold": 0.2},
+    )
+    wheel_action_l2 = RewTerm(
+        func=mdp.action_l2_joint,
+        weight=-0.005,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=M20_WHEEL_JOINTS)},
+    )
+    # Relax the stage-1 posture constraint enough for obstacle negotiation.
+    leg_deviation_l2 = RewTerm(
+        func=mdp.joint_deviation_l2,
+        weight=-0.03,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=M20_LEG_JOINTS)},
+    )
+
+
+@configclass
 class M20DepthRoughAMPEnvCfg(M20DepthRoughEnvCfg):
     """M20 depth task using canonical 12-leg-joint AMP observations."""
+
+    reward = M20DepthRoughAMPRewardCfg()
 
 
 @configclass
@@ -323,7 +356,7 @@ class M20DepthRoughAMPAgentCfg(M20DepthRoughAgentCfg):
             "class_path": "legged_lab.amp.retarget:NoOpRetargetAdapter",
         },
         "num_preload_transitions": 200000,
-        "reward_coef": 0.01,
+        "reward_coef": 0.03,
         "task_reward_lerp": 0.3,
         "discriminator_hidden_dims": [1024, 512],
         "replay_buffer_size": 200000,

@@ -46,17 +46,9 @@ _PAGE = r"""<!doctype html>
     .value { min-width: 0; padding: 12px 10px; text-align: center; background: #fff; }
     .value strong { display: block; font: 650 20px/1.2 ui-monospace, monospace; letter-spacing: 0; }
     .value span { display: block; margin-top: 4px; color: #68736d; font-size: 12px; }
-    .controls { display: grid; grid-template-columns: 1fr 1fr; align-items: end; gap: 28px; margin-top: 28px; }
-    .control { display: flex; min-width: 0; flex-direction: column; align-items: center; gap: 12px; }
-    .control label { align-self: stretch; color: #4e5a54; font-size: 13px; font-weight: 650; text-align: center; }
-    .pad { position: relative; width: min(260px, 78vw); aspect-ratio: 1; border: 1px solid #aeb8b2; border-radius: 50%; background: #fff; box-shadow: inset 0 0 0 1px #eef1ef; user-select: none; }
-    .pad::before, .pad::after { content: ""; position: absolute; background: #d6dcd8; pointer-events: none; }
-    .pad::before { left: 50%; top: 10%; bottom: 10%; width: 1px; }
-    .pad::after { left: 10%; right: 10%; top: 50%; height: 1px; }
-    .axis { position: relative; width: min(260px, 78vw); height: 72px; border: 1px solid #aeb8b2; border-radius: 6px; background: #fff; user-select: none; }
-    .axis::before { content: ""; position: absolute; left: 10%; right: 10%; top: 50%; height: 2px; background: #d6dcd8; }
-    .knob { position: absolute; left: 50%; top: 50%; width: 54px; height: 54px; border: 2px solid #087f8c; border-radius: 50%; background: #dff4f5; box-shadow: 0 3px 10px #1d3b3d33; transform: translate(-50%, -50%); pointer-events: none; }
-    .axis .knob { width: 42px; height: 42px; }
+    .keyboard { margin-top: 24px; padding: 18px; border: 1px solid #cbd1cd; border-radius: 6px; background: #fff; text-align: center; }
+    .keyboard strong { display: block; margin-bottom: 8px; font-size: 16px; }
+    .keyboard span { color: #53605a; font-size: 14px; line-height: 1.7; }
     .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 30px; }
     .actions button { width: 100%; height: 54px; border-radius: 6px; font-size: 16px; font-weight: 750; letter-spacing: 0; cursor: pointer; }
     .reset { border: 1px solid #78837d; background: #fff; color: #27312c; }
@@ -74,10 +66,7 @@ _PAGE = r"""<!doctype html>
     <div class="value"><strong id="vy">0.00</strong><span>vy m/s</span></div>
     <div class="value"><strong id="wz">0.00</strong><span>wz rad/s</span></div>
   </section>
-  <section class="controls">
-    <div class="control"><label>线速度</label><div id="linear" class="pad"><i id="linearKnob" class="knob"></i></div></div>
-    <div class="control"><label>转向</label><div id="turn" class="axis"><i id="turnKnob" class="knob"></i></div></div>
-  </section>
+  <section class="keyboard"><strong>键盘控制</strong><span>W / S 前进后退　A / D 左右横移　Q / E 左右转向</span></section>
   <div class="actions">
     <button id="reset" class="reset" type="button">复位机器人</button>
     <button id="stop" class="stop" type="button">急停</button>
@@ -98,18 +87,7 @@ _PAGE = r"""<!doctype html>
   let keyboardActive = false;
   let keyboardFrameTime = performance.now();
   const $ = id => document.getElementById(id);
-  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
   const updateReadout = () => Object.keys(command).forEach(k => $(k).textContent = command[k].toFixed(2));
-  const updateKnobs = () => {
-    let x = limits.vy > 0 ? -command.vy / limits.vy : 0;
-    let y = limits.vx > 0 ? -command.vx / limits.vx : 0;
-    const radius = Math.hypot(x, y);
-    if (radius > 1) { x /= radius; y /= radius; }
-    $('linearKnob').style.left = `${50 + x * 40}%`;
-    $('linearKnob').style.top = `${50 + y * 40}%`;
-    const turn = limits.wz > 0 ? command.wz / limits.wz : 0;
-    $('turnKnob').style.left = `${50 - turn * 40}%`;
-  };
   const showStatus = live => {
     $('status').classList.toggle('live', live);
     $('status').querySelector('span').textContent = live ? '连接正常' : '连接断开';
@@ -125,36 +103,6 @@ _PAGE = r"""<!doctype html>
     } catch (_) { showStatus(false); }
     finally { sendPending = false; }
   }
-  function bindPad(element, knob, update, release) {
-    let pointer = null;
-    const move = event => {
-      if (pointer !== event.pointerId || !controlsReady) return;
-      const box = element.getBoundingClientRect();
-      const x = clamp((event.clientX - box.left) / box.width * 2 - 1, -1, 1);
-      const y = clamp((event.clientY - box.top) / box.height * 2 - 1, -1, 1);
-      update(x, y);
-      knob.style.left = `${50 + x * 40}%`;
-      knob.style.top = `${50 + y * 40}%`;
-      updateReadout(); send();
-    };
-    element.addEventListener('pointerdown', event => {
-      pressed.clear(); keyboardActive = false;
-      keyboardAxis.vx = keyboardAxis.vy = keyboardAxis.wz = 0;
-      pointer = event.pointerId; element.setPointerCapture(pointer); move(event);
-    });
-    element.addEventListener('pointermove', move);
-    const end = event => {
-      if (pointer !== event.pointerId) return;
-      pointer = null; release(); knob.style.left = '50%'; knob.style.top = '50%'; updateReadout(); send();
-    };
-    element.addEventListener('pointerup', end);
-    element.addEventListener('pointercancel', end);
-  }
-  bindPad($('linear'), $('linearKnob'), (x, y) => {
-    const radius = Math.hypot(x, y); const scale = radius > 1 ? 1 / radius : 1;
-    command.vx = -y * scale * limits.vx; command.vy = -x * scale * limits.vy;
-  }, () => { command.vx = 0; command.vy = 0; });
-  bindPad($('turn'), $('turnKnob'), x => { command.wz = -x * limits.wz; }, () => { command.wz = 0; });
   const keyboardTarget = () => ({
     vx: (pressed.has('KeyW') ? 1 : 0) - (pressed.has('KeyS') ? 1 : 0),
     vy: (pressed.has('KeyA') ? 1 : 0) - (pressed.has('KeyD') ? 1 : 0),
@@ -193,7 +141,7 @@ _PAGE = r"""<!doctype html>
         keyboardActive = false;
         send();
       }
-      updateKnobs(); updateReadout();
+      updateReadout();
     }
     requestAnimationFrame(updateKeyboard);
   };
@@ -202,8 +150,6 @@ _PAGE = r"""<!doctype html>
     keyboardActive = false;
     keyboardAxis.vx = keyboardAxis.vy = keyboardAxis.wz = 0;
     command.vx = command.vy = command.wz = 0;
-    $('linearKnob').style.left = $('linearKnob').style.top = '50%';
-    $('turnKnob').style.left = $('turnKnob').style.top = '50%';
     updateReadout(); send();
   };
   window.addEventListener('keydown', event => {
@@ -280,7 +226,7 @@ def open_joystick_window(url: str) -> DesktopJoystickWindow:
                         executable,
                         f"--user-data-dir={profile_dir}",
                         f"--app={url}",
-                        "--window-size=820,720",
+                        "--window-size=700,430",
                         "--no-first-run",
                         "--no-default-browser-check",
                     ],

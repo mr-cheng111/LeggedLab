@@ -142,12 +142,6 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
 )
 
 
-def _copy_with_proportion(sub_terrain, proportion: float):
-    copied = sub_terrain.copy()
-    copied.proportion = proportion
-    return copied
-
-
 M20_ALL_TERRAINS_CFG = TerrainGeneratorCfg(
     class_type=MixedTerrainGenerator,
     curriculum=True,
@@ -161,23 +155,15 @@ M20_ALL_TERRAINS_CFG = TerrainGeneratorCfg(
     slope_threshold=0.75,
     use_cache=False,
     sub_terrains={
-        # Preserve every terrain from ROUGH_TERRAINS_CFG.
-        "pyramid_stairs_28": _copy_with_proportion(ROUGH_TERRAINS_CFG.sub_terrains["pyramid_stairs_28"], 0.05),
-        "pyramid_stairs_30": _copy_with_proportion(ROUGH_TERRAINS_CFG.sub_terrains["pyramid_stairs_30"], 0.05),
-        "pyramid_stairs_32": _copy_with_proportion(ROUGH_TERRAINS_CFG.sub_terrains["pyramid_stairs_32"], 0.05),
-        "pyramid_stairs_34": _copy_with_proportion(ROUGH_TERRAINS_CFG.sub_terrains["pyramid_stairs_34"], 0.05),
-        "boxes": _copy_with_proportion(ROUGH_TERRAINS_CFG.sub_terrains["boxes"], 0.05),
-        "random_rough": _copy_with_proportion(ROUGH_TERRAINS_CFG.sub_terrains["random_rough"], 0.05),
-        "wave": _copy_with_proportion(ROUGH_TERRAINS_CFG.sub_terrains["wave"], 0.05),
-        "high_platform": _copy_with_proportion(ROUGH_TERRAINS_CFG.sub_terrains["high_platform"], 0.05),
-        # One column per special terrain, with a second column for gap and climb.
-        "wmp_wave": WMPSubTerrainCfg(proportion=0.05, kind="wave"),
+        # Stage 2: use the A1 WMP terrain distribution while retaining M20's
+        # terrain implementations and curriculum difficulty progression.
+        "wmp_wave": WMPSubTerrainCfg(proportion=0.0, kind="wave"),
         "wmp_slope": WMPSubTerrainCfg(proportion=0.05, kind="slope"),
-        "wmp_stair_up": WMPSubTerrainCfg(proportion=0.05, kind="stair_up"),
-        "wmp_stair_down": WMPSubTerrainCfg(proportion=0.05, kind="stair_down"),
-        "wmp_discrete": WMPSubTerrainCfg(proportion=0.05, kind="discrete"),
-        "wmp_gap": WMPSubTerrainCfg(proportion=0.10, kind="gap"),
-        "wmp_climb": WMPSubTerrainCfg(proportion=0.10, kind="climb"),
+        "wmp_stair_up": WMPSubTerrainCfg(proportion=0.15, kind="stair_up"),
+        "wmp_stair_down": WMPSubTerrainCfg(proportion=0.15, kind="stair_down"),
+        "wmp_discrete": WMPSubTerrainCfg(proportion=0.0, kind="discrete"),
+        "wmp_gap": WMPSubTerrainCfg(proportion=0.25, kind="gap"),
+        "wmp_climb": WMPSubTerrainCfg(proportion=0.25, kind="climb"),
         "wmp_tilt": WMPSubTerrainCfg(proportion=0.05, kind="tilt"),
         "wmp_crawl": WMPSubTerrainCfg(proportion=0.05, kind="crawl"),
         "wmp_rough_flat": WMPSubTerrainCfg(proportion=0.05, kind="rough_flat"),

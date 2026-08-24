@@ -52,7 +52,8 @@
 | `--seed SEED` | `None` | 覆盖随机种子。 |
 | `--runner {default,wmp_amp}` | `default` | checkpoint 类型。WMP checkpoint 需要用 `wmp_amp`。 |
 | `--play_flat` | `False` | 播放时将地形替换为平地，同时保留 WMP sensor obs 形状。 |
-| `--play_render_interval PLAY_RENDER_INTERVAL` | `4` | 覆盖播放渲染间隔。数值越小 GUI 越流畅但越重；`4` 约等于 50Hz 渲染。 |
+| `--play_terrain_set {classic,wmp,flat}` | `None` | 覆盖播放地形集；分别选择经典崎岖地形、手工 WMP 地形或平地。 |
+| `--play_render_interval PLAY_RENDER_INTERVAL` | `None` | 覆盖播放渲染间隔。数值越小 GUI 越流畅但越重；`4` 约等于 50Hz 渲染。 |
 | `--enable_play_push` | `False` | 播放时保留 interval push 扰动；默认会关闭 push。 |
 | `--hide_command` | `False` | 隐藏命令速度/当前速度调试可视化。 |
 
@@ -60,7 +61,8 @@
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `--show_depth_image` | `False` | 显示或保存 WMP 风格 `64x64` depth 图。开启后自动启用相机。 |
+| `--show_depth_image` | `True` | 显示或保存 WMP 风格 `64x64` depth 图，播放时默认开启并自动启用相机。 |
+| `--no_show_depth_image` | `False` | 关闭播放时默认启用的深度图输出。 |
 | `--depth_image_mode {auto,window,save}` | `auto` | depth 图显示模式。`auto` 优先窗口，OpenCV GUI 不可用时自动保存 PNG；`save` 只保存。 |
 | `--depth_image_dir DEPTH_IMAGE_DIR` | `None` | depth PNG 保存目录。不传时保存到当前 run 的 `depth_images` 目录。 |
 | `--depth_image_save_interval DEPTH_IMAGE_SAVE_INTERVAL` | `10` | 每 N 个 play step 保存一张 depth 图。 |
@@ -69,8 +71,9 @@
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `--show_depth_points` | `False` | 将 depth 图反投影成红色 debug points。开启后自动启用相机和 `isaacsim.util.debug_draw`。 |
-| `--depth_point_stride DEPTH_POINT_STRIDE` | `16` | 采样像素步长。值越小点越密，渲染越重。 |
+| `--show_depth_points` | `True` | 将 depth 图反投影成红色 debug points，并绘制从相机到采样点的绿色射线。播放时默认开启，并自动启用相机和 `isaacsim.util.debug_draw`。 |
+| `--no_show_depth_points` | `False` | 关闭播放时默认启用的 depth 反投影点，用于降低渲染开销。 |
+| `--depth_point_stride DEPTH_POINT_STRIDE` | `4` | 二维像素网格采样步长。值越小点越密，渲染越重。 |
 | `--depth_point_max DEPTH_POINT_MAX` | `300` | 最多绘制多少个 depth 点。 |
 | `--depth_point_size DEPTH_POINT_SIZE` | `5.0` | 红色 depth 点的 debug draw 尺寸。 |
 | `--depth_point_forward_min DEPTH_POINT_FORWARD_MIN` | `0.2` | 只显示大于该深度距离的点。 |
@@ -79,7 +82,7 @@
 | `--depth_point_max_z DEPTH_POINT_MAX_Z` | `None` | 只显示世界坐标 z 小于该值的点。 |
 | `--depth_point_debug` | `False` | 定期打印 depth 点统计信息。 |
 | `--depth_point_lift DEPTH_POINT_LIFT` | `0.05` | 绘制时将点沿世界 z 方向抬高，避免被地面遮住。 |
-| `--depth_point_draw_rays` | `False` | 从相机到 depth 点绘制黄色射线。该模式较重，且 UI 中更容易卡顿。 |
+| `--depth_point_draw_rays` | `False` | 兼容旧命令保留的参数；现在显示 depth 点时总会绘制绿色射线。 |
 | `--depth_point_camera_index DEPTH_POINT_CAMERA_INDEX` | `0` | 可视化第几个 depth camera。传 `-1` 表示显示所有相机环境的点。 |
 
 ### play.py height scanner 参数
@@ -288,4 +291,4 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 | 快速排查 WMP 链路 | `--num_envs=2 --wmp_camera_num_envs=2 --max_iterations=1 --num_steps_per_env=2 --num_mini_batches=1` |
 | 看 64x64 depth 输出 | `--show_depth_image --depth_image_mode=save --depth_image_save_interval=5` |
 | 看地面反投影点 | `--show_depth_points --depth_point_camera_index=-1 --depth_point_stride=8` |
-| 播放卡顿 | 减小 `--num_envs`，增大 `--play_render_interval`，关闭 `--show_depth_points` 或增大 `--depth_point_stride`。 |
+| 播放卡顿 | 减小 `--num_envs`，增大 `--play_render_interval`，使用 `--no_show_depth_points` 或增大 `--depth_point_stride`。 |

@@ -79,7 +79,9 @@ retarget:
   posture_mode: neutral
   max_ik_iters: 40
   solver: mink
-  qp_solver: daqp
+  # Isaac Lab pins daqp==0.7.2, while current qpsolvers passes newer
+  # warm-start arguments that this DAQP release does not accept.
+  qp_solver: quadprog
   damping: 1.0e-5
   posture_cost: 0.005
   frame_pos_cost: 1.0

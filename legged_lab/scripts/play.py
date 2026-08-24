@@ -13,6 +13,7 @@ import argparse
 import os
 import subprocess
 import sys
+import sysconfig
 import tempfile
 
 import torch
@@ -39,12 +40,31 @@ parser.add_argument(
 )
 parser.add_argument("--play_flat", action="store_true", help="Play on a flat plane while keeping WMP sensor obs shapes.")
 parser.add_argument(
+    "--play_terrain_set",
+    choices=("classic", "wmp", "flat"),
+    default=None,
+    help="Override playback terrain set: classic Isaac Lab rough terrains, project WMP terrains, or a flat plane.",
+)
+parser.add_argument(
     "--play_render_interval",
     type=int,
-    default=None,
+    default=1,
     help="Override sim render interval during play. Lower values make GUI smoother but heavier.",
 )
-parser.add_argument("--show_depth_image", action="store_true", help="Show the original WMP-style 64x64 depth image window.")
+depth_image_group = parser.add_mutually_exclusive_group()
+depth_image_group.add_argument(
+    "--show_depth_image",
+    dest="show_depth_image",
+    action="store_true",
+    default=True,
+    help="Show the original WMP-style 64x64 depth image window (default).",
+)
+depth_image_group.add_argument(
+    "--no_show_depth_image",
+    dest="show_depth_image",
+    action="store_false",
+    help="Disable WMP depth image output during play.",
+)
 parser.add_argument(
     "--depth_image_mode",
     type=str,
@@ -54,7 +74,20 @@ parser.add_argument(
 )
 parser.add_argument("--depth_image_dir", type=str, default=None, help="Directory for saved WMP depth image PNGs.")
 parser.add_argument("--depth_image_save_interval", type=int, default=10, help="Save one depth image every N play steps.")
-parser.add_argument("--show_depth_points", action="store_true", help="Visualize RGBD depth hits as red debug points.")
+depth_points_group = parser.add_mutually_exclusive_group()
+depth_points_group.add_argument(
+    "--show_depth_points",
+    dest="show_depth_points",
+    action="store_true",
+    default=True,
+    help="Visualize RGBD depth hits as red debug points (default).",
+)
+depth_points_group.add_argument(
+    "--no_show_depth_points",
+    dest="show_depth_points",
+    action="store_false",
+    help="Disable RGBD depth-hit debug points during play.",
+)
 parser.add_argument("--show_height_scan_points", action="store_true", help="Visualize height scanner ray hits.")
 parser.add_argument("--enable_play_push", action="store_true", help="Keep interval push disturbances enabled during play.")
 parser.add_argument(
@@ -91,7 +124,12 @@ parser.add_argument(
     help="Stop command after this many seconds without a joystick heartbeat.",
 )
 parser.add_argument("--no_open_joystick", action="store_true", help="Do not open the joystick desktop window.")
-parser.add_argument("--depth_point_stride", type=int, default=16, help="Pixel stride for depth hit point visualization.")
+parser.add_argument(
+    "--depth_point_stride",
+    type=int,
+    default=4,
+    help="2D pixel-grid stride for depth hit point visualization.",
+)
 parser.add_argument("--depth_point_max", type=int, default=300, help="Maximum depth hit points to draw.")
 parser.add_argument("--depth_point_size", type=float, default=5.0, help="Debug draw size of each red depth hit point.")
 parser.add_argument("--depth_point_forward_min", type=float, default=0.2, help="Minimum forward distance for depth hit points.")
@@ -100,7 +138,11 @@ parser.add_argument("--depth_point_min_z", type=float, default=None, help="Minim
 parser.add_argument("--depth_point_max_z", type=float, default=None, help="Maximum world z for visualized depth hit points.")
 parser.add_argument("--depth_point_debug", action="store_true", help="Print depth point visualization statistics.")
 parser.add_argument("--depth_point_lift", type=float, default=0.05, help="Lift visualized depth points above surfaces.")
-parser.add_argument("--depth_point_draw_rays", action="store_true", help="Draw yellow rays from camera origins to depth points.")
+parser.add_argument(
+    "--depth_point_draw_rays",
+    action="store_true",
+    help="Deprecated compatibility option; green rays are always drawn with depth points.",
+)
 parser.add_argument(
     "--depth_point_camera_index",
     type=int,
@@ -146,8 +188,20 @@ if args_cli.show_depth_image and args_cli.depth_image_mode == "window":
     if args_cli.depth_image_dir is None:
         args_cli.depth_image_dir = tempfile.mkdtemp(prefix="leggedlab_depth_preview_")
     viewer_script = os.path.join(os.path.dirname(__file__), "depth_image_viewer.py")
+    viewer_env = os.environ.copy()
+    # Isaac Sim prepends its headless cv2 pip_prebundle to sys.path. The viewer
+    # is a separate desktop process and must prefer the GUI-enabled OpenCV wheel
+    # installed in the active Conda environment instead.
+    conda_site_packages = sysconfig.get_path("purelib")
+    inherited_pythonpath = viewer_env.get("PYTHONPATH", "")
+    viewer_env["PYTHONPATH"] = os.pathsep.join(
+        path for path in (conda_site_packages, inherited_pythonpath) if path
+    )
+    viewer_env.pop("QT_PLUGIN_PATH", None)
+    viewer_env.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
     depth_viewer_process = subprocess.Popen(
-        [sys.executable, viewer_script, args_cli.depth_image_dir, "--parent-pid", str(os.getpid())]
+        [sys.executable, viewer_script, args_cli.depth_image_dir, "--parent-pid", str(os.getpid())],
+        env=viewer_env,
     )
     print(f"[INFO] External depth viewer started: {args_cli.depth_image_dir}", flush=True)
 
@@ -170,6 +224,7 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab.utils.math import transform_points, unproject_depth
 
 from legged_lab.envs import *  # noqa:F401, F403
+from legged_lab.terrains import M20_ALL_TERRAINS_CFG, ROUGH_TERRAINS_CFG
 from legged_lab.utils.cli_args import update_rsl_rl_cfg
 from legged_lab.utils.rsl_rl_compat import adapt_legacy_cfg_for_rsl_rl_v5, is_rsl_rl_v5_plus
 from legged_lab.world_models.wmp.preprocess import depth_to_wmp_image
@@ -184,7 +239,7 @@ def _acquire_debug_draw_interface():
         except ModuleNotFoundError as exc:
             raise ModuleNotFoundError(
                 "Debug draw is unavailable in this IsaacSim environment. "
-                "Run without --show_depth_points, or install/enable the debug draw extension."
+                "Run with --no_show_depth_points, or install/enable the debug draw extension."
             ) from exc
     return _debug_draw.acquire_debug_draw_interface()
 
@@ -218,11 +273,19 @@ def _depth_to_hit_points(
 
     points_cam = unproject_depth(selected_depth, selected_intrinsics, is_ortho=True)
     points_world = transform_points(points_cam, selected_pos, selected_quat)
-    points_world = points_world[:, ::stride]
+
+    # Isaac Lab flattens unprojected pixels in (u, v) order. Restore that 2D
+    # grid before subsampling so stride applies along both image axes. Applying
+    # ``::stride`` to the flattened array repeatedly selects the same few
+    # columns and produces misleading stripes instead of a view-filling grid.
+    image_height, image_width = selected_depth.shape[1:3]
+    points_world = points_world.reshape(-1, image_width, image_height, 3)
+    points_world = points_world[:, ::stride, ::stride, :].reshape(selected_depth.shape[0], -1, 3)
     point_origins = selected_pos[:, None, :].expand(-1, points_world.shape[1], -1)
 
     # unproject_depth 内部按 (u, v) 顺序展开 depth，因此这里用同样顺序对齐 mask。
-    sampled_depth = selected_depth[..., 0].transpose(1, 2).reshape(selected_depth.shape[0], -1)[:, ::stride]
+    sampled_depth = selected_depth[..., 0].transpose(1, 2)
+    sampled_depth = sampled_depth[:, ::stride, ::stride].reshape(selected_depth.shape[0], -1)
     valid = (
         torch.isfinite(sampled_depth)
         & (sampled_depth > near)
@@ -319,7 +382,7 @@ def _draw_depth_rays(draw_interface, origins: torch.Tensor, points: torch.Tensor
     stride = max(1, points.shape[0] // max(1, ray_count))
     ray_ends = points[::stride][:ray_count]
     ray_starts = origins[::stride][:ray_count]
-    colors = [(1.0, 0.9, 0.0, 1.0)] * ray_ends.shape[0]
+    colors = [(0.0, 1.0, 0.0, 1.0)] * ray_ends.shape[0]
     sizes = [1.5] * ray_ends.shape[0]
     draw_interface.draw_lines(ray_starts.detach().cpu().tolist(), ray_ends.detach().cpu().tolist(), colors, sizes)
 
@@ -358,9 +421,16 @@ def _show_wmp_depth_image_window(image) -> bool:
     import cv2
 
     try:
-        cv2.namedWindow("Depth Image", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("Depth Image", 320, 320)
-        cv2.imshow("Depth Image", image)
+        title = "Depth Image"
+        if not getattr(_show_wmp_depth_image_window, "window_created", False):
+            cv2.namedWindow(title, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(title, 320, 320)
+            _show_wmp_depth_image_window.window_created = True
+        _, _, width, height = cv2.getWindowImageRect(title)
+        display_image = image
+        if width > 0 and height > 0:
+            display_image = cv2.resize(image, (width, height), interpolation=cv2.INTER_NEAREST)
+        cv2.imshow(title, display_image)
         cv2.waitKey(1)
         return True
     except cv2.error as exc:
@@ -463,7 +533,18 @@ def play():
     if args_cli.play_render_interval is not None:
         env_cfg.sim.render_interval = max(1, int(args_cli.play_render_interval))
 
-    if args_cli.play_flat:
+    if args_cli.play_flat and args_cli.play_terrain_set not in (None, "flat"):
+        raise ValueError("--play_flat cannot be combined with a non-flat --play_terrain_set.")
+    terrain_set = "flat" if args_cli.play_flat else args_cli.play_terrain_set
+    if terrain_set == "classic":
+        env_cfg.scene.terrain_generator = ROUGH_TERRAINS_CFG.copy()
+        env_cfg.scene.terrain_type = "generator"
+        env_cfg.scene.max_init_terrain_level = 0
+    elif terrain_set == "wmp":
+        env_cfg.scene.terrain_generator = M20_ALL_TERRAINS_CFG.copy()
+        env_cfg.scene.terrain_type = "generator"
+        env_cfg.scene.max_init_terrain_level = 0
+    elif terrain_set == "flat":
         # 播放平地时只替换地形，不关闭 WMP height scanner。
         # 这样 actor/critic 的 height_scan 维度仍与训练 checkpoint 保持一致。
         env_cfg.scene.terrain_generator = None
@@ -475,9 +556,8 @@ def play():
 
     if env_cfg.scene.terrain_generator is not None:
         env_cfg.scene.terrain_generator.num_rows = 5
-        env_cfg.scene.terrain_generator.num_cols = 5
         env_cfg.scene.terrain_generator.curriculum = False
-        env_cfg.scene.terrain_generator.difficulty_range = (0.4, 0.4)
+        env_cfg.scene.terrain_generator.difficulty_range = (0.0, 0.0)
 
     if args_cli.num_envs is not None:
         env_cfg.scene.num_envs = args_cli.num_envs
@@ -682,8 +762,7 @@ def play():
                         camera_index=args_cli.depth_point_camera_index,
                     )
                     _draw_depth_hit_points(depth_draw, depth_points, args_cli.depth_point_size)
-                    if args_cli.depth_point_draw_rays:
-                        _draw_depth_rays(depth_draw, depth_origins, depth_points)
+                    _draw_depth_rays(depth_draw, depth_origins, depth_points)
                     if args_cli.depth_point_debug and depth_debug_counter % 60 == 0:
                         print(
                             f"[INFO] Depth points: "
@@ -695,6 +774,13 @@ def play():
                     depth_debug_counter += 1
                 play_step += 1
     finally:
+        if depth_viewer_process is not None and depth_viewer_process.poll() is None:
+            depth_viewer_process.terminate()
+            try:
+                depth_viewer_process.wait(timeout=3.0)
+            except subprocess.TimeoutExpired:
+                depth_viewer_process.kill()
+                depth_viewer_process.wait(timeout=2.0)
         if joystick_window is not None:
             joystick_window.close()
         if joystick is not None:
