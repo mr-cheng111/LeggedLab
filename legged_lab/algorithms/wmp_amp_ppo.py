@@ -158,8 +158,8 @@ class WMPAMPPPO(PPO):
 
             policy_state, policy_next_state = policy_batch
             expert_state, expert_next_state = expert_batch
+            raw_policy_state = policy_state
             raw_expert_state = expert_state
-            raw_expert_next_state = expert_next_state
             with torch.no_grad():
                 policy_state = self.amp_normalizer.normalize_torch(policy_state, self.device)
                 policy_next_state = self.amp_normalizer.normalize_torch(policy_next_state, self.device)
@@ -171,7 +171,7 @@ class WMPAMPPPO(PPO):
             expert_loss = torch.nn.functional.mse_loss(expert_d, torch.ones_like(expert_d))
             policy_loss = torch.nn.functional.mse_loss(policy_d, -torch.ones_like(policy_d))
             grad_pen = (
-                self.discriminator.compute_grad_pen(raw_expert_state, raw_expert_next_state)
+                self.discriminator.compute_grad_pen(expert_state.detach(), expert_next_state.detach())
                 if self.grad_penalty_coef > 0.0
                 else torch.zeros((), device=self.device)
             )
@@ -189,13 +189,14 @@ class WMPAMPPPO(PPO):
             loss.backward()
             nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
             nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+            nn.utils.clip_grad_norm_(self.discriminator.parameters(), self.max_grad_norm)
             if self.is_multi_gpu:
                 self.reduce_parameters()
             self.optimizer.step()
             self._clamp_action_std()
 
-            self.amp_normalizer.update(policy_state)
-            self.amp_normalizer.update(expert_state)
+            self.amp_normalizer.update(raw_policy_state)
+            self.amp_normalizer.update(raw_expert_state)
             mean_value_loss += float(value_loss.detach().cpu())
             mean_surrogate_loss += float(surrogate_loss.detach().cpu())
             mean_entropy += float(entropy.mean().detach().cpu())

@@ -135,7 +135,7 @@
 | `--distributed` | `False` | 多 GPU / 多节点训练。 |
 | `--amp_num_preload_transitions AMP_NUM_PRELOAD_TRANSITIONS` | `None` | 覆盖 AMP expert preload transitions。 |
 | `--amp_reward_coef AMP_REWARD_COEF` | `None` | 覆盖 AMP discriminator reward 系数。 |
-| `--amp_task_reward_lerp AMP_TASK_REWARD_LERP` | `None` | 覆盖 AMP task reward 混合系数。 |
+| `--amp_task_reward_lerp AMP_TASK_REWARD_LERP` | `None` | 覆盖 AMP/task 奖励插值系数 `alpha`：`r=(1-alpha)r_amp+alpha*r_task`，范围 `[0,1]`。 |
 | `--wmp_camera_num_envs WMP_CAMERA_NUM_ENVS` | `None` | 覆盖真实 WMP depth camera 环境数量。 |
 | `--wmp_depth_training_iters WMP_DEPTH_TRAINING_ITERS` | `None` | 覆盖 DepthPredictor 每次触发时训练迭代数。 |
 | `--wmp_depth_batch_size WMP_DEPTH_BATCH_SIZE` | `None` | 覆盖 DepthPredictor batch size。 |

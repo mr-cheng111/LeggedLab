@@ -14,7 +14,9 @@ class AMPDiscriminator(nn.Module):
         super().__init__()
         self.input_dim = input_dim
         self.amp_reward_coef = amp_reward_coef
-        self.task_reward_lerp = task_reward_lerp
+        self.task_reward_lerp = float(task_reward_lerp)
+        if not 0.0 <= self.task_reward_lerp <= 1.0:
+            raise ValueError(f"task_reward_lerp must be in [0, 1], got {self.task_reward_lerp}.")
         layers = []
         curr_dim = input_dim
         for hidden_dim in hidden_layer_sizes:
@@ -57,10 +59,8 @@ class AMPDiscriminator(nn.Module):
             d = self.forward(torch.cat([state, next_state], dim=-1))
             # WMP 原式: r_amp = coef * clamp(1 - 1/4 * (D(s,s') - 1)^2, min=0)
             amp_reward = self.amp_reward_coef * torch.clamp(1.0 - 0.25 * torch.square(d - 1.0), min=0.0)
-            reward = amp_reward
-            if self.task_reward_lerp > 0:
-                # WMP 原版 `_lerp_reward` 的实际实现为 r = disc_r + task_r。
-                reward = reward + task_reward.unsqueeze(-1)
+            task_reward = task_reward.to(device=amp_reward.device, dtype=amp_reward.dtype).reshape_as(amp_reward)
+            reward = torch.lerp(amp_reward, task_reward, self.task_reward_lerp)
             self.train()
         if return_details:
             return reward.squeeze(-1), d.squeeze(-1), amp_reward.squeeze(-1)

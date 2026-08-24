@@ -512,7 +512,9 @@ class BaseEnv(VecEnv):
         reward_buf = self.reward_manager.compute(self.step_dt)
         reward_buf = self._post_process_rewards(reward_buf)
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
-        terminal_amp_states = self.get_amp_observations()[env_ids]
+        terminal_amp_states = None
+        if self.cfg.robot.enable_amp_observations:
+            terminal_amp_states = self.get_amp_observations()[env_ids]
         self.reset(env_ids)
         self._apply_command_override()
         if self.cfg.robot.terminate_on_wmp_velocity_violation and self.wmp_vel_violate_buf is not None:

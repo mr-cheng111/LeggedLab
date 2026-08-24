@@ -211,6 +211,14 @@ python legged_lab/scripts/play.py \
 `m20_depth_rough_amp` 在深度 WMP 任务上增加 AMP。专家状态保持原版 30 维契约：
 `joint_pos(12) + base_lin_vel_b(3) + base_ang_vel_b(3) + joint_vel(12)`。12 个关节严格按
 `M20_LEG_JOINT_NAMES` 排列，4 个连续转动轮关节不进入 AMP 判别器。
+总奖励按 `r = (1 - task_reward_lerp) * r_amp + task_reward_lerp * r_task` 混合；M20 默认
+`reward_coef=0.01`、`task_reward_lerp=0.3`。
+
+当前 M20 配置将 `M20_AMP_ENABLED` 暂时设为 `False`。同一开关同步控制环境 AMP observation
+和 agent 的 `amp.enabled`；禁用时任务会切换为纯 `WMPRunner + PPO`，
+不加载 AMP motion、不创建判别器，也不计算 AMP 奖励；日志写入 `m20_depth_rough_no_amp`。
+将 [m20_config.py](legged_lab/envs/m20/m20_config.py) 中该开关恢复为
+`True` 后，会重新使用 `WMPAMPRunner + WMPAMPPPO` 和上述奖励混合参数。
 
 M20 rough、depth rough 和 depth rough AMP 任务使用统一的全地形课程。它保留普通金字塔
 台阶、方块、随机起伏、波浪和高台，并加入 WMP wave、斜坡、上下楼梯、离散起伏、沟壑、
@@ -239,14 +247,13 @@ conda run --no-capture-output -n mujoco \
 conda run --no-capture-output -n isaaclab3 \
   python legged_lab/scripts/train.py \
   --task=m20_depth_rough_amp \
-  --runner=wmp_amp \
+  --runner=default \
   --num_envs=2 \
   --enable_cameras \
   --wmp_camera_num_envs=2 \
   --max_iterations=1 \
   --num_steps_per_env=2 \
   --num_mini_batches=1 \
-  --amp_num_preload_transitions=256 \
   --viz=none \
   --logger=tensorboard
 ```
@@ -257,7 +264,7 @@ conda run --no-capture-output -n isaaclab3 \
 conda run --no-capture-output -n isaaclab3 \
   python legged_lab/scripts/train.py \
   --task=m20_depth_rough_amp \
-  --runner=wmp_amp \
+  --runner=default \
   --num_envs=4096 \
   --enable_cameras \
   --wmp_camera_num_envs=256 \

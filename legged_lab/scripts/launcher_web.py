@@ -1329,7 +1329,7 @@ INDEX_HTML = r"""<!doctype html>
       "--wandb_api_key": "wandb API key。通常从环境变量 WANDB_API_KEY 读取。",
       "--distributed": "多 GPU / 多节点训练开关。",
       "--amp_reward_coef": "AMP 判别器奖励系数，控制模仿奖励在总奖励中的权重。",
-      "--amp_task_reward_lerp": "AMP 奖励与任务奖励混合系数。数值越大越偏向 task reward。",
+      "--amp_task_reward_lerp": "AMP 与任务奖励的插值系数 alpha，范围 [0,1]。数值越大越偏向 task reward。",
       "--wmp_camera_num_envs": "真实 WMP 深度相机环境数量。可小于 num_envs，用部分相机降低渲染成本。",
       "--wmp_depth_training_iters": "DepthPredictor 每次触发时训练多少个梯度迭代。",
       "--wmp_depth_batch_size": "DepthPredictor 训练 batch size。",

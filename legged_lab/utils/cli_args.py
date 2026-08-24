@@ -98,7 +98,7 @@ def add_rsl_rl_args(parser: argparse.ArgumentParser):
         "--amp_task_reward_lerp",
         type=float,
         default=None,
-        help="Override AMP task reward lerp/mixing parameter.",
+        help="Override AMP/task reward interpolation alpha in [0, 1].",
     )
     arg_group.add_argument(
         "--wmp_camera_num_envs",

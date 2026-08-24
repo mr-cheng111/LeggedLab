@@ -31,6 +31,7 @@ M20_LEG_JOINTS = [".*_hipx_joint", ".*_hipy_joint", ".*_knee_joint"]
 M20_HIPX_JOINTS = [".*_hipx_joint"]
 M20_WHEEL_JOINTS = [".*_wheel_joint"]
 M20_WHEEL_BODIES = ".*_wheel"
+M20_AMP_ENABLED = False
 
 
 @configclass
@@ -328,19 +329,24 @@ class M20DepthRoughAMPRewardCfg(M20RewardCfg):
 
 @configclass
 class M20DepthRoughAMPEnvCfg(M20DepthRoughEnvCfg):
-    """M20 depth task using canonical 12-leg-joint AMP observations."""
+    """M20 depth task retaining optional canonical 12-leg-joint AMP observations."""
 
     reward = M20DepthRoughAMPRewardCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.robot.enable_amp_observations = M20_AMP_ENABLED
 
 
 @configclass
 class M20DepthRoughAMPAgentCfg(M20DepthRoughAgentCfg):
-    """M20 WMP-AMP training with motions retargeted offline from A1."""
+    """M20 WMP training with AMP retained behind a temporary feature flag."""
 
     experiment_name: str = "m20_depth_rough_amp"
     wandb_project: str = "m20_depth_rough_amp"
     runner_class_name: str = "legged_lab.runners.wmp_amp_runner:WMPAMPRunner"
     amp: dict = {
+        "enabled": M20_AMP_ENABLED,
         "motion_files": [
             "datasets/retargeted/m20/hop1_left.txt",
             "datasets/retargeted/m20/hop1_right.txt",
@@ -356,7 +362,7 @@ class M20DepthRoughAMPAgentCfg(M20DepthRoughAgentCfg):
             "class_path": "legged_lab.amp.retarget:NoOpRetargetAdapter",
         },
         "num_preload_transitions": 200000,
-        "reward_coef": 0.03,
+        "reward_coef": 0.01,
         "task_reward_lerp": 0.3,
         "discriminator_hidden_dims": [1024, 512],
         "replay_buffer_size": 200000,
@@ -366,6 +372,13 @@ class M20DepthRoughAMPAgentCfg(M20DepthRoughAgentCfg):
 
     def __post_init__(self):
         super().__post_init__()
+        if not self.amp.get("enabled", True):
+            self.experiment_name = "m20_depth_rough_no_amp"
+            self.wandb_project = "m20_depth_rough_no_amp"
+            self.runner_class_name = "legged_lab.runners.wmp_amp_runner:WMPRunner"
+            self.algorithm.class_name = "PPO"
+            return
+
         self.algorithm.class_name = "legged_lab.algorithms.wmp_amp_ppo:WMPAMPPPO"
         self.algorithm.learning_rate = 1.0e-3
         self.algorithm.schedule = "adaptive"

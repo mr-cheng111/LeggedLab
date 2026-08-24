@@ -158,7 +158,9 @@ class WheeledEnv(BaseEnv):
         reward_buf = self.reward_manager.compute(self.step_dt)
         reward_buf = self._post_process_rewards(reward_buf)
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
-        terminal_amp_states = self.get_amp_observations()[env_ids]
+        terminal_amp_states = None
+        if self.cfg.robot.enable_amp_observations:
+            terminal_amp_states = self.get_amp_observations()[env_ids]
         self.reset(env_ids)
 
         actor_obs, critic_obs = self.compute_observations()

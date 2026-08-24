@@ -123,6 +123,7 @@ class BaseSceneCfg:
 class RobotCfg:
     actor_obs_history_length: int = 10
     critic_obs_history_length: int = 10
+    enable_amp_observations: bool = True
     action_scale: float = 0.25
     leg_position_scale: dict[str, float] = {}
     wheel_velocity_scale: float = 8.0

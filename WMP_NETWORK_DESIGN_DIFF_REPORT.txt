@@ -489,6 +489,7 @@ shape 对齐点:
 
 reward 公式:
   r_amp = amp_reward_coef * clamp(1 - 1/4 * (D(s,s') - 1)^2, min=0)
+  r = (1 - task_reward_lerp) * r_amp + task_reward_lerp * r_task
 
 
 7.2 当前 AMPDiscriminator
@@ -992,8 +993,8 @@ critic 维度已经对齐，下一步不是改维度，而是验收字段语义:
     因此 reset 后的新初始状态不会被写入旧 episode。
   - DepthPredictor 结构与原版一致；当前 forward 额外支持 leading shape reshape，
     这是 API 兼容增强，不改变单 batch / batch-time 的输出语义。
-  - AMPDiscriminator 的 reward 公式、task_reward_lerp 实际行为、grad penalty 公式与原版一致。
-    原版虽然叫 lerp，但实现为 disc_r + task_r；当前也保留这一行为。
+  - AMPDiscriminator 保留原版 r_amp 公式，但修正了原版名为 lerp、实际直接相加的歧义。
+    当前 task_reward_lerp 严格执行线性插值，并校验参数范围为 [0,1]。
   - A1 WMP PPO/AMP 关键配置仍与原版一致:
       entropy_coef=0.01
       vel_predict_coef=1.0
