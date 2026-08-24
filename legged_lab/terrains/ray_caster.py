@@ -11,7 +11,7 @@
 
 from collections.abc import Sequence
 
-from isaaclab.sensors.ray_caster import RayCaster as BaseRayCaster
+from isaaclab_physx.sensors.ray_caster import RayCaster as BaseRayCaster
 
 
 class RayCaster(BaseRayCaster):
